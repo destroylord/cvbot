@@ -54,7 +54,9 @@ bukan dimasukkan ke CV. Tetap baca CV hasilnya sebelum mengirim.
    - `gemini` (disarankan, ada kuota gratis): login dengan akun Google di
      https://aistudio.google.com/apikey, klik buat API key, salin ke `GEMINI_API_KEY`.
      Kalau model default sudah tidak tersedia, ganti `GEMINI_MODEL` dengan nama model
-     yang tertera di AI Studio.
+     yang tertera di AI Studio. Kalau Gemini sedang sibuk (error 503), bot otomatis mencoba ulang
+     beberapa kali lalu pindah ke model cadangan (`GEMINI_FALLBACK_MODELS`). Kalau tetap gagal,
+     tekan **🔄 Coba lagi** beberapa menit kemudian.
    - `ollama` (gratis, offline): install dari https://ollama.com, lalu jalankan
      `ollama pull qwen2.5:7b`. Butuh RAM sekitar 16 GB agar lancar, dan hasilnya
      biasanya kurang bagus dibanding Gemini/Claude.

@@ -623,8 +623,11 @@ async def process_job(message, context, uid: int, job_text: str):
         job = await asyncio.to_thread(ai_helper.analyze_job, profile, job_text)
     except Exception as e:
         log.exception("analisis gagal")
-        await msg.edit_text(f"Gagal menganalisis lowongan: {e}")
+        # Simpan teks lowongannya supaya bisa dicoba lagi tanpa kirim ulang (misalnya saat AI sedang sibuk)
+        context.user_data["retry_job_text"] = job_text
+        await msg.edit_text(f"Gagal menganalisis lowongan: {e}", reply_markup=kb([("🔄 Coba lagi", "retryjob")]))
         return
+    context.user_data["retry_job_text"] = None
     if job.get("bukan_lowongan"):
         await msg.edit_text("Sepertinya itu bukan halaman/teks lowongan kerja. "
                             "Coba copy-paste deskripsi lowongannya langsung ke sini.")
@@ -1130,6 +1133,15 @@ async def btn_recommendation(query, context, uid, data, rid):
     await process_job(query.message, context, uid, job_text)
 
 
+async def btn_retry_job(query, context, uid, data, arg):
+    job_text = context.user_data.get("retry_job_text")
+    await query.edit_message_reply_markup(None)
+    if not job_text:
+        await query.message.reply_text("Lowongan ini sudah tidak tersimpan. Kirim ulang lowongannya ya.")
+        return
+    await process_job(query.message, context, uid, job_text)
+
+
 # ---- tombol di bawah ini butuh lowongan yang sedang diproses (context.user_data["job"])
 async def btn_tailor(query, context, uid, data, arg):
     await query.edit_message_reply_markup(None)
@@ -1233,7 +1245,7 @@ BUTTONS = {
     "app": btn_app_detail, "st": btn_status,
     "str": lambda *a: btn_status(*a, new_message=True),
     "fu": btn_followup_draft, "fusend": btn_followup_send, "fucancel": btn_followup_cancel,
-    "rec": btn_recommendation,
+    "rec": btn_recommendation, "retryjob": btn_retry_job,
     "tailor": btn_tailor, "orig": btn_original_cv, "cl": btn_cover_letter, "send": btn_send,
     "confirm": btn_confirm_send, "editto": btn_edit_recipient, "cancel": btn_cancel_send,
 }

@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-11-09 (lanjutan): Gemini sibuk (503) tidak langsung gagal
+
+Sebelumnya, saat server Gemini sedang ramai, bot langsung menampilkan error mentah
+`Gemini error 503: {...}` dan lowongan harus dikirim ulang.
+
+- **Coba ulang otomatis**: error 500/502/503/504 dan koneksi putus dicoba ulang sampai 4 kali di model
+  yang sama, dengan jeda 2, 5, lalu 10 detik.
+- **Model cadangan**: kalau model utama tetap sibuk, kuotanya habis (429), atau namanya tidak ada (404),
+  bot pindah ke `GEMINI_FALLBACK_MODELS` (default `gemini-2.5-flash-lite`, punya kuota sendiri).
+  Kosongkan nilainya kalau tidak mau memakai model cadangan.
+- **Pesan error ramah**: tidak ada lagi JSON mentah. Pesannya dibedakan antara server sibuk, kuota habis,
+  dan nama model salah.
+- **Tombol 🔄 Coba lagi** saat analisis lowongan gagal, memakai teks lowongan yang sama (termasuk hasil baca
+  foto), jadi tidak perlu kirim ulang.
+- Error yang bukan sementara (misalnya API key salah) tetap langsung ditampilkan tanpa coba ulang.
+
+Diuji 19 pengecekan dengan server Gemini palsu: sibuk lalu pulih, koneksi putus, sibuk terus, kuota habis,
+model tidak ada, API key salah, urutan model cadangan dari `.env`, dan tombol Coba lagi.
+
+
 ## 2026-11-09 (lanjutan): modul yang hilang ditulis ulang, bot bisa jalan
 
 Sejak commit pertama, `bot.py` memanggil empat modul yang tidak pernah ada di repo, sehingga bot

@@ -7,10 +7,14 @@ Provider AI dipilih lewat AI_PROVIDER di .env:
 """
 import base64
 import json
+import logging
 import os
 import re
+import time
 
 import requests
+
+log = logging.getLogger("cvbot.ai")
 
 
 def _ask(system: str, prompt: str, max_tokens: int = 2000, image: tuple[bytes, str] | None = None) -> str:
@@ -28,30 +32,72 @@ def _ask(system: str, prompt: str, max_tokens: int = 2000, image: tuple[bytes, s
     return re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
 
 
+# Gemini kadang sibuk (503) atau error sementara. Coba ulang dengan jeda makin lama,
+# lalu pindah ke model cadangan (kuota & bebannya terpisah dari model utama).
+GEMINI_RETRY_STATUS = {500, 502, 503, 504}
+GEMINI_RETRY_DELAYS = (2, 5, 10)  # detik sebelum percobaan ke-2, ke-3, ke-4
+
+
+class _GeminiUnavailable(Exception):
+    """Model ini sedang tidak bisa dipakai (sibuk / kuota habis / tidak ada). Coba model lain."""
+
+    def __init__(self, reason: str, status: int):
+        super().__init__(reason)
+        self.status = status
+
+
+def _gemini_models() -> list[str]:
+    primary = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+    fallbacks = os.getenv("GEMINI_FALLBACK_MODELS", "gemini-2.5-flash-lite").split(",")
+    return list(dict.fromkeys([primary] + [m.strip() for m in fallbacks if m.strip()]))
+
+
 def _ask_gemini(system: str, prompt: str, image: tuple[bytes, str] | None = None) -> str:
-    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     parts = [{"text": prompt}]
     if image:
         parts.insert(0, {"inline_data": {"mime_type": image[1], "data": base64.b64encode(image[0]).decode()}})
-    resp = requests.post(
-        url,
-        headers={"x-goog-api-key": os.environ["GEMINI_API_KEY"], "Content-Type": "application/json"},
-        json={
-            "systemInstruction": {"parts": [{"text": system}]},
-            "contents": [{"role": "user", "parts": parts}],
-        },
-        timeout=180,
-    )
-    if resp.status_code == 429:
+    body = {"systemInstruction": {"parts": [{"text": system}]}, "contents": [{"role": "user", "parts": parts}]}
+
+    failures = []
+    for model in _gemini_models():
+        try:
+            return _gemini_request(model, body)
+        except _GeminiUnavailable as e:
+            log.warning("Gemini %s tidak tersedia: %s", model, e)
+            failures.append(e)
+    if all(f.status == 429 for f in failures):
         raise RuntimeError("Kuota gratis Gemini habis untuk sementara. Tunggu sebentar lalu coba lagi.")
-    if not resp.ok:
-        raise RuntimeError(f"Gemini error {resp.status_code}: {resp.text[:300]}")
-    candidates = resp.json().get("candidates") or []
-    if not candidates:
-        raise RuntimeError("Gemini tidak memberi jawaban (mungkin terkena filter). Coba lagi.")
-    parts = candidates[0].get("content", {}).get("parts") or []
-    return "".join(p.get("text", "") for p in parts if not p.get("thought"))
+    if all(f.status == 404 for f in failures):
+        raise RuntimeError(f"Model Gemini tidak ditemukan. Cek GEMINI_MODEL di .env ({failures[0]}).")
+    raise RuntimeError("Server Gemini sedang sibuk dan sudah dicoba beberapa kali. "
+                       "Biasanya hanya sebentar, coba lagi beberapa menit lagi.")
+
+
+def _gemini_request(model: str, body: dict) -> str:
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    headers = {"x-goog-api-key": os.environ["GEMINI_API_KEY"], "Content-Type": "application/json"}
+    last = None
+    for delay in (0,) + GEMINI_RETRY_DELAYS:
+        time.sleep(delay)
+        try:
+            resp = requests.post(url, headers=headers, json=body, timeout=180)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last = _GeminiUnavailable(f"koneksi gagal ({type(e).__name__})", 0)
+            continue
+        if resp.status_code in GEMINI_RETRY_STATUS:
+            last = _GeminiUnavailable(f"HTTP {resp.status_code}", resp.status_code)
+            continue
+        if resp.status_code in (404, 429):
+            # Tidak ada gunanya diulang di model yang sama; model cadangan punya kuota sendiri
+            raise _GeminiUnavailable(f"HTTP {resp.status_code}", resp.status_code)
+        if not resp.ok:
+            raise RuntimeError(f"Gemini error {resp.status_code}: {resp.text[:300]}")
+        candidates = resp.json().get("candidates") or []
+        if not candidates:
+            raise RuntimeError("Gemini tidak memberi jawaban (mungkin terkena filter). Coba lagi.")
+        parts = candidates[0].get("content", {}).get("parts") or []
+        return "".join(p.get("text", "") for p in parts if not p.get("thought"))
+    raise last
 
 
 def _ask_ollama(system: str, prompt: str, image: tuple[bytes, str] | None = None) -> str:
