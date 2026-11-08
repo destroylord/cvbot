@@ -1,0 +1,105 @@
+# Changelog
+
+## 2026-11-09
+
+### Ringkasan
+
+| Fitur | Sebelumnya | Sekarang |
+| --- | --- | --- |
+| Akun Gmail | Hanya 1 akun | Bisa 2 akun atau lebih, pengirim dipilih saat konfirmasi |
+| Cara pakai bot | Harus mengetik perintah | Tombol menu di bawah chat + tombol **Menu** Telegram |
+| Pengaturan | Hanya `/gaya` | `/pengaturan`: gaya, akun Gmail default, nyala/matikan cek otomatis |
+| Sumber lowongan | Job alert, link, teks | + foto/poster lowongan, + forward dari grup/channel lain |
+| Email tujuan | Tidak bisa diganti di konfirmasi | Tombol **✏️ Ganti email tujuan** |
+| Menjalankan bot | `python bot.py`, harus tetap terbuka | `./bot.sh install`: service systemd di VPS, jalan di background |
+| Log | Hanya di terminal | Juga di `data/bot.log` dan `journalctl` |
+
+### 1. Banyak akun Gmail
+
+Tambahkan akun lain di `.env` dengan akhiran `_2`, `_3`, dst. Setiap akun butuh App Password sendiri.
+
+```
+GMAIL_ADDRESS=utama@gmail.com
+GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
+GMAIL_ADDRESS_2=kedua@gmail.com
+GMAIL_APP_PASSWORD_2=yyyy yyyy yyyy yyyy
+```
+
+- **Rekomendasi**: job alert dibaca dari semua akun. Email yang sama di dua akun hanya diproses sekali.
+  Kalau satu akun gagal login, akun lain tetap dicek.
+- **Kirim lamaran**: layar konfirmasi menampilkan tombol **Kirim dari ...** untuk tiap akun.
+  Akun default (⭐) ada di paling atas. Dengan satu akun, tampilannya tetap **Ya, kirim**.
+- **Balasan HR & follow-up**: tiap lamaran mencatat akun pengirimnya (field `dari`). Balasan HR dicek
+  di inbox akun itu, dan follow-up dikirim dari akun itu supaya masuk ke thread email yang sama.
+- Akun pengirim tampil di detail lamaran (`/lamaran`).
+
+File terkait: `gmail_accounts.py` (baru), `mailer.py`, `gmail_replies.py`, `bot.py`.
+
+### 2. Menu dan pengaturan
+
+- Setelah `/start`, muncul tombol menu tetap di bawah kolom chat:
+  🎯 Rekomendasi, 📂 Lamaran, 📬 Cek Balasan, 📊 Statistik, 👤 Profil, ⚙️ Pengaturan.
+- Tombol **Menu** bawaan Telegram (di samping kolom chat) berisi daftar semua perintah. Daftar ini
+  dipasang otomatis setiap bot start.
+- **⚙️ Pengaturan** (`/pengaturan` atau `/config`):
+  - gaya cover letter (formal, santai, singkat)
+  - akun Gmail default (hanya muncul kalau akun lebih dari satu)
+  - rekomendasi harian: ON/OFF
+  - cek balasan HR otomatis: ON/OFF
+
+  Jam cek, ambang skor, dan daftar akun Gmail tetap diatur di `.env`.
+
+### 3. Foto lowongan dan forward dari grup
+
+- Kirim foto/screenshot poster lowongan (sebagai foto, atau file JPG/PNG/WEBP maks. 5 MB).
+  AI menyalin isi gambar, termasuk email HR, lalu alurnya sama seperti lowongan biasa:
+  skor, penyesuaian CV, cover letter, kirim.
+- Teks di bawah foto (caption) ikut dibaca.
+- Lowongan dari grup/channel Telegram lain: tekan lama postingannya, **Forward**, pilih bot kamu.
+  Teks maupun foto yang di-forward diproses otomatis. Bot tidak memantau grup sendiri, supaya akun
+  Telegram kamu aman dari banned.
+- AI bisa salah membaca huruf di gambar. Cek alamat tujuan di layar konfirmasi dan pakai
+  **✏️ Ganti email tujuan** kalau keliru.
+- Didukung Gemini dan Claude. Untuk Ollama, isi `OLLAMA_VISION_MODEL` (default `qwen2.5vl:7b`)
+  lalu jalankan `ollama pull qwen2.5vl:7b`.
+
+File terkait: `ai_helper.py` (`read_job_image`, dukungan gambar di semua provider), `bot.py`.
+
+### 4. Jalan di background (VPS Linux)
+
+`bot.sh` memasang bot sebagai service systemd: jalan di background, start otomatis saat VPS boot,
+dan restart sendiri 10 detik setelah crash. Langkah lengkapnya ada di
+[README > Jalan di VPS](README.md#jalan-di-vps-linux-background).
+
+```
+./bot.sh install     # pasang & jalankan
+./bot.sh status      # cek status + log terakhir
+./bot.sh log         # log langsung (Ctrl+C keluar)
+./bot.sh restart     # setelah ubah .env atau git pull
+./bot.sh uninstall   # hentikan & hapus service
+```
+
+### 5. Lain-lain
+
+- `.gitignore`: `.env` (password & token) dan `data/` (CV & data lamaran) tidak ikut ter-commit.
+- `.gitattributes`: `*.sh` selalu LF supaya bisa jalan di Linux walau di-commit dari Windows.
+
+### Cara upgrade dari versi sebelumnya
+
+1. `git pull`
+2. `.env` lama tetap jalan tanpa diubah. Opsional: tambah `GMAIL_ADDRESS_2` / `GMAIL_APP_PASSWORD_2`,
+   dan `OLLAMA_VISION_MODEL` kalau pakai Ollama.
+3. Data lamaran lama tetap terbaca. Lamaran lama yang belum punya field `dari` dianggap dikirim
+   dari akun utama (`GMAIL_ADDRESS`).
+4. Restart bot (`./bot.sh restart`, atau `./bot.sh install` kalau belum pernah dipasang), lalu
+   kirim `/start` sekali supaya tombol menu muncul.
+
+### Belum beres
+
+- File `job_alerts.py`, `job_fetcher.py`, `cv_parser.py`, `cv_builder.py`, dan `requirements.txt`
+  belum ada di repo, jadi bot belum bisa dijalankan dari hasil clone.
+- Setelah `job_alerts.py` ditambahkan, `fetch_alert_emails(seen, days, account)` harus menerima
+  parameter `account` dan login memakai `account.address` / `account.password`, bukan
+  `GMAIL_ADDRESS` / `GMAIL_APP_PASSWORD` dari environment.
+- Belum diuji langsung di Telegram maupun di VPS. Yang sudah dicek baru: semua file Python lolos
+  compile, `bot.sh` lolos cek sintaks, dan pembacaan akun Gmail dari `.env`.

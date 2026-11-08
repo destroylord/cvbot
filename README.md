@@ -4,6 +4,19 @@ Bot Telegram untuk scan CV, cari rekomendasi lowongan dari email job alert, meny
 per lowongan (tetap jujur), membuat cover letter, lalu kirim lamaran via Gmail
 **setelah kamu konfirmasi**.
 
+Daftar perubahan terbaru dan cara upgrade: lihat [CHANGELOG.md](CHANGELOG.md).
+
+## Mulai cepat
+
+1. Isi `.env` (lihat [Setup](#setup)), lalu jalankan bot di VPS dengan `./bot.sh install`
+   (lihat [Jalan di VPS](#jalan-di-vps-linux-background)).
+2. Di Telegram, buka bot kamu dan kirim `/start`. Tombol menu muncul di bawah kolom chat.
+3. Kirim file CV (PDF/DOCX).
+4. Kirim lowongan: link, teks, foto poster, atau forward postingan dari grup lain.
+   Atau tekan **🎯 Rekomendasi** untuk cari dari email job alert.
+5. Ikuti tombol yang muncul: sesuaikan CV, buat cover letter, pilih akun Gmail, kirim.
+6. Pantau lewat **📂 Lamaran**, atur preferensi di **⚙️ Pengaturan**.
+
 ## Alur
 
 1. Kirim CV (PDF/DOCX) ke bot. CV dibaca dan diringkas jadi profil.
@@ -104,6 +117,13 @@ di samping kolom chat, jadi tidak perlu hafal perintahnya.
 - `/gaya` - atur gaya cover letter (formal, santai, singkat)
 - `/profil` - lihat hasil scan CV
 - `/revisi <instruksi>` - revisi cover letter atau email follow-up terakhir
+
+Isi **⚙️ Pengaturan**:
+
+- **Gaya cover letter**: formal, santai, atau singkat
+- **Akun Gmail default**: akun yang ditaruh paling atas (⭐) saat konfirmasi kirim
+  (muncul kalau ada lebih dari satu akun)
+- **Rekomendasi harian** dan **Cek balasan otomatis**: ON/OFF
 
 ## Tracker lamaran & balasan HR
 
