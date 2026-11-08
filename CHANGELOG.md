@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-11-09 (lanjutan): modul yang hilang ditulis ulang, bot bisa jalan
+
+Sejak commit pertama, `bot.py` memanggil empat modul yang tidak pernah ada di repo, sehingga bot
+langsung berhenti saat start (`ModuleNotFoundError`). Keempatnya sekarang ditulis ulang:
+
+| File | Fungsi |
+| --- | --- |
+| `cv_parser.py` | Baca teks CV dari PDF (`pypdf`) dan DOCX (`python-docx`), termasuk isi tabel dan header DOCX. PDF terkunci tanpa password tetap dicoba dibuka. |
+| `cv_builder.py` | Buat PDF CV yang sudah disesuaikan (`reportlab`): satu kolom dan ramah ATS, judul bagian Indonesia/Inggris sesuai bahasa lowongan. Tahan data AI yang tidak rapi (null, teks biasa padahal seharusnya daftar, emoji, kutip miring). |
+| `job_fetcher.py` | Buka link lowongan. Data terstruktur `JobPosting` (dipakai banyak situs lowongan) dibaca lebih dulu, lalu teks halaman tanpa menu/footer. Pesan error jelas kalau situs memblokir bot. |
+| `job_alerts.py` | Baca email job alert dari tiap akun Gmail (IMAP read-only + `BODY.PEEK`, jadi email tidak ditandai sudah dibaca). Pengirim diatur lewat `ALERT_SENDERS`, maksimal 10 email terbaru per pengirim supaya kuota AI aman. Link diganti penanda `[L1]`, `[L2]`, dan link berhenti-berlangganan dibuang. |
+| `requirements.txt` | Daftar library. `anthropic` hanya perlu kalau `AI_PROVIDER=claude`. |
+
+Diuji dengan 38 pengecekan memakai library asli: CV PDF/DOCX sungguhan, server web lokal, email MIME
+tiruan (HTML, teks biasa, subjek ter-encode, charset lain, lampiran), IMAP palsu, bot start sungguhan
+(13 handler + jadwal otomatis), dan alur end-to-end: upload DOCX → profil → lowongan skor rendah →
+PDF CV disesuaikan. Selama pengujian ditemukan dan diperbaiki: URL di akhir kalimat ikut membawa tanda
+titik.
+
+Bagian "Belum beres" di entri sebelumnya soal file yang hilang sudah selesai. Yang belum pernah dicoba
+hanya koneksi ke layanan sungguhan (Telegram, Gmail, dan AI), karena butuh token dan akun kamu.
+
+
 ## 2026-11-09 (lanjutan): kelola akun Gmail dari bot
 
 Akun Gmail tidak perlu lagi ditulis di `.env`. Semua bisa dari Telegram:
