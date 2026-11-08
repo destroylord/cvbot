@@ -64,10 +64,8 @@ bukan dimasukkan ke CV. Tetap baca CV hasilnya sebelum mengirim.
    - Aktifkan verifikasi 2 langkah di akun Google kamu.
    - Buka https://myaccount.google.com/apppasswords, buat app password baru, salin 16 karakternya.
    - Kalau login IMAP gagal, cek pengaturan Gmail > Lihat semua setelan > Penerusan dan POP/IMAP.
-   - **Lebih dari satu akun**: isi `GMAIL_ADDRESS_2` / `GMAIL_APP_PASSWORD_2`, `_3`, dst.
-     (app password dibuat terpisah di tiap akun). Job alert dibaca dari semua akun, dan saat
-     konfirmasi kirim kamu memilih akun pengirimnya. Balasan HR dicek dan follow-up dikirim
-     dari akun yang sama dengan lamarannya.
+   - Akun Gmail **tidak perlu** diisi di `.env`. Setelah bot jalan, buka **⚙️ Pengaturan > 📧 Akun Gmail**
+     (lihat [Kelola akun Gmail](#kelola-akun-gmail)).
 6. **Aktifkan job alert** di JobStreet, Glints, LinkedIn, dll. dengan email Gmail yang sama.
    Atur kata kunci dan lokasi sesuai posisi yang kamu incar.
 7. Salin `.env.example` menjadi `.env`, lalu isi semua nilainya.
@@ -84,7 +82,7 @@ git clone https://github.com/destroylord/cvbot.git
 cd cvbot
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-cp .env.example .env && nano .env      # isi token, ID Telegram, API key AI, akun Gmail
+cp .env.example .env && nano .env      # isi token, ID Telegram, API key AI
 .venv/bin/python bot.py                # tes dulu di depan; kalau sudah jalan, Ctrl+C
 chmod +x bot.sh
 ./bot.sh install
@@ -104,6 +102,46 @@ Update ke versi terbaru: `git pull && .venv/bin/pip install -r requirements.txt 
 Jangan jalankan `python bot.py` manual saat service aktif, dan jangan jalankan bot yang sama
 di laptop sekaligus. Dua bot dengan token yang sama akan saling bentrok.
 
+## Kelola akun Gmail
+
+Buka **⚙️ Pengaturan > 📧 Akun Gmail**:
+
+- **➕ Tambah akun**: ketik alamat Gmail, lalu app password-nya. Bot langsung mencoba login
+  (baca dan kirim email). Akun baru disimpan hanya kalau login berhasil. Pesan berisi password
+  langsung dihapus dari chat.
+- Pilih salah satu akun untuk **⭐ Jadikan default**, **🔑 Ganti app password**, atau **🗑️ Hapus akun**.
+- Ketik `batal`, atau tekan tombol menu mana pun, untuk membatalkan isian.
+
+Job alert dibaca dari semua akun. Saat konfirmasi kirim, kamu memilih akun pengirimnya (akun default
+ada di paling atas). Balasan HR dicek dan follow-up dikirim dari akun yang sama dengan lamarannya.
+
+Akun yang ditambahkan lewat bot disimpan di `data/gmail_accounts.json` (hanya bisa dibaca pemilik file).
+Akun yang diisi di `.env` tetap jalan dan ditandai `(.env)`, tapi hanya bisa diubah atau dihapus
+lewat `.env`. Menu ini hanya aktif kalau `ALLOWED_USER_IDS` sudah diisi.
+
+## Alur foto lowongan
+
+Saat kamu mengirim atau mem-forward foto poster lowongan:
+
+1. Bot mengecek CV kamu sudah ada, lalu mengunduh foto (resolusi terbesar).
+2. **AI membaca gambar** dan menyalin semua teksnya: posisi, kualifikasi, cara melamar, dan email HR.
+   Caption foto ikut dibaca. Kalau gambarnya bukan lowongan atau tidak terbaca, bot memberi tahu
+   dan berhenti di sini.
+3. **AI mencocokkan** lowongan dengan CV kamu: skor, skill yang cocok dan yang kurang, dan email HR.
+4. Kalau skor di bawah `CV_TAILOR_THRESHOLD`, CV otomatis disesuaikan dan PDF baru dikirim untuk kamu cek.
+   Kalau skornya tinggi, kamu pilih **Buat Cover Letter**, **Sesuaikan CV**, atau **Lewati**.
+5. **Buat Cover Letter**, revisi dengan `/revisi` kalau perlu, lalu **📧 Kirim via Gmail**.
+6. **Layar konfirmasi**: tujuan (email HR dari gambar), subjek, lampiran CV, lalu kamu pilih akun
+   pengirimnya. Kalau email di gambar tidak terbaca, bot menanyakannya. Kalau terbaca tapi salah,
+   tekan **✏️ Ganti email tujuan**.
+7. Setelah terkirim, lamaran tercatat di **📂 Lamaran** dan balasan HR dicek otomatis.
+
+Tidak ada email yang terkirim tanpa kamu menekan tombol kirim di langkah 6.
+
+Satu foto diproses sebagai satu lowongan. Kalau poster terdiri dari beberapa foto (album), tiap foto
+diproses terpisah. Untuk poster seperti itu, lebih baik kirim satu foto yang paling lengkap, atau
+paste teksnya.
+
 ## Perintah
 
 Tombol menu muncul di bawah kolom chat setelah `/start`, dan daftar perintah ada di tombol **Menu**
@@ -113,7 +151,7 @@ di samping kolom chat, jadi tidak perlu hafal perintahnya.
 - `/lamaran` - daftar lamaran, ubah status, buat follow-up
 - `/statistik` - statistik lamaran (tingkat respons, interview, per minggu)
 - `/cekbalasan` - cek balasan HR di Gmail sekarang
-- `/pengaturan` (atau `/config`) - gaya cover letter, akun Gmail default, nyala/matikan cek otomatis
+- `/pengaturan` (atau `/config`) - gaya cover letter, kelola akun Gmail, nyala/matikan cek otomatis
 - `/gaya` - atur gaya cover letter (formal, santai, singkat)
 - `/profil` - lihat hasil scan CV
 - `/revisi <instruksi>` - revisi cover letter atau email follow-up terakhir
@@ -121,8 +159,7 @@ di samping kolom chat, jadi tidak perlu hafal perintahnya.
 Isi **⚙️ Pengaturan**:
 
 - **Gaya cover letter**: formal, santai, atau singkat
-- **Akun Gmail default**: akun yang ditaruh paling atas (⭐) saat konfirmasi kirim
-  (muncul kalau ada lebih dari satu akun)
+- **📧 Akun Gmail**: tambah, ganti app password, hapus, dan pilih akun default (⭐)
 - **Rekomendasi harian** dan **Cek balasan otomatis**: ON/OFF
 
 ## Tracker lamaran & balasan HR

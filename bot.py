@@ -151,7 +151,8 @@ def kb(*rows):
         [[InlineKeyboardButton(text, callback_data=data) for text, data in row] for row in rows])
 
 
-GMAIL_MISSING = "GMAIL_ADDRESS / GMAIL_APP_PASSWORD belum diisi di .env."
+GMAIL_MISSING = "Belum ada akun Gmail. Tambahkan lewat ⚙️ Pengaturan > 📧 Akun Gmail."
+APP_PASSWORD_RE = re.compile(r"[a-zA-Z]{16}")
 
 
 def gmail_configured() -> bool:
@@ -284,14 +285,12 @@ def settings_view(data: dict):
     onoff = {key: "Aktif" if data.get(key, True) else "Mati" for key in TOGGLES}
     text = (f"⚙️ Pengaturan\n\n"
             f"Gaya cover letter: {GAYA_LABEL.get(data.get('gaya', 'formal'))}\n"
-            f"Akun Gmail default: {default.address if default else 'belum diisi di .env'}"
+            f"Akun Gmail default: {default.address if default else 'belum ada'}"
             f"{f' ({len(accounts)} akun terhubung)' if len(accounts) > 1 else ''}\n"
             f"Rekomendasi harian jam {DAILY_CHECK_TIME}: {onoff['auto_rekomendasi']}\n"
             f"Cek balasan HR tiap {REPLY_CHECK_MINUTES} menit: {onoff['auto_balasan']}\n\n"
-            f"Jam, ambang skor, dan akun Gmail diatur di file .env.")
-    rows = [[("✍️ Gaya cover letter", "set:gaya")]]
-    if len(accounts) > 1:
-        rows.append([("📧 Akun Gmail default", "set:akun")])
+            f"Jam dan ambang skor diatur di file .env.")
+    rows = [[("✍️ Gaya cover letter", "set:gaya")], [("📧 Akun Gmail", "acc")]]
     rows += [[(f"{label}: {'ON ✅' if data.get(key, True) else 'OFF ⛔'}", f"set:tog:{key}")]
              for key, label in TOGGLES.items()]
     return text, kb(*rows)
@@ -512,7 +511,7 @@ def apps_by_account(apps: list[dict]) -> dict:
         if account:
             by_account.setdefault(account, []).append(a)
         else:
-            log.warning("akun pengirim lamaran #%s (%s) tidak ada di .env", a["id"], a.get("dari"))
+            log.warning("akun pengirim lamaran #%s (%s) sudah tidak terdaftar", a["id"], a.get("dari"))
     return by_account
 
 
@@ -779,8 +778,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
 
     if text in MENU_ACTIONS:
-        context.user_data["awaiting_email"] = False
+        context.user_data.update({"awaiting_email": False, "gmail_form": None})
         await MENU_ACTIONS[text](update, context)
+        return
+
+    if context.user_data.get("gmail_form"):
+        await handle_gmail_form(update.message, context, uid, text)
         return
 
     if context.user_data.get("awaiting_email"):
@@ -866,28 +869,147 @@ async def btn_gaya(query, context, uid, data, style):
 
 
 async def btn_settings(query, context, uid, data, arg):
-    """set:gaya, set:akun, set:akun:<i>, set:tog:<key>, set:back"""
+    """set:gaya, set:tog:<key>, set:back"""
     parts = arg.split(":")
     if parts[0] == "gaya":
         text, markup = gaya_view(data)
         await safe_edit(query.message, text, markup)
         return
-    if parts[0] == "akun" and len(parts) == 1:
-        default = default_account(data)
-        rows = [[(f"{'⭐ ' if a == default else ''}{a.address}", f"set:akun:{i}")]
-                for i, a in enumerate(gmail_accounts.load())]
-        await safe_edit(query.message, "Pilih akun Gmail default untuk mengirim lamaran:",
-                        kb(*rows, [("⬅️ Kembali", "set:back")]))
-        return
-    if parts[0] == "akun":
-        accounts = gmail_accounts.load()
-        idx = int(parts[1])
-        if idx < len(accounts):
-            update_user(uid, lambda d: d.__setitem__("gmail_default", accounts[idx].address))
-    elif parts[0] == "tog" and parts[1] in TOGGLES:
+    if parts[0] == "tog" and parts[1] in TOGGLES:
         update_user(uid, lambda d: d.__setitem__(parts[1], not d.get(parts[1], True)))
     text, markup = settings_view(load_user(uid))
     await safe_edit(query.message, text, markup)
+
+
+def accounts_view(data: dict):
+    accounts = gmail_accounts.load()
+    default = default_account(data)
+    if accounts:
+        lines = [f"{'⭐' if a == default else '•'} {a.address}{' (.env)' if a.from_env else ''}" for a in accounts]
+        text = ("📧 Akun Gmail\n\n" + "\n".join(lines) +
+                "\n\n⭐ = akun default saat mengirim lamaran. Job alert dibaca dari semua akun.\n"
+                "Pilih akun untuk jadikan default, ganti app password, atau hapus.")
+    else:
+        text = "📧 Akun Gmail\n\nBelum ada akun. Tambahkan akun untuk membaca job alert dan mengirim lamaran."
+    rows = [[(a.address, f"acc:{i}")] for i, a in enumerate(accounts)]
+    return text, kb(*rows, [("➕ Tambah akun", "acc:add")], [("⬅️ Pengaturan", "set:back")])
+
+
+def account_detail_view(data: dict, i: int, account: gmail_accounts.Account):
+    is_default = account == default_account(data)
+    text = (f"📧 {account.address}\n"
+            f"{'⭐ Akun default' if is_default else 'Bukan akun default'}\n")
+    rows = [] if is_default else [[("⭐ Jadikan default", f"acc:{i}:def")]]
+    if account.from_env:
+        text += "\nAkun ini diatur di file .env, jadi app password dan penghapusannya diubah lewat .env."
+    else:
+        rows += [[("🔑 Ganti app password", f"acc:{i}:pw")], [("🗑️ Hapus akun", f"acc:{i}:del")]]
+    return text, kb(*rows, [("⬅️ Daftar akun", "acc")])
+
+
+ADD_ACCOUNT_HELP = (
+    "Ketik app password Gmail untuk {address} (16 huruf, spasi boleh).\n\n"
+    "Cara buat: aktifkan verifikasi 2 langkah di akun Google, lalu buka "
+    "https://myaccount.google.com/apppasswords dan buat app password baru.\n\n"
+    "Pesan berisi password akan langsung aku hapus dari chat. Ketik batal untuk membatalkan.")
+
+
+async def btn_accounts(query, context, uid, data, arg):
+    """acc, acc:add, acc:<i>, acc:<i>:def, acc:<i>:pw, acc:<i>:del, acc:delok"""
+    if not ALLOWED:
+        await query.message.reply_text("Isi ALLOWED_USER_IDS di .env dulu supaya orang lain tidak bisa "
+                                       "melihat atau mengubah akun Gmail kamu.")
+        return
+    parts = arg.split(":") if arg else []
+    if not parts:
+        text, markup = accounts_view(data)
+        await safe_edit(query.message, text, markup)
+        return
+    if parts[0] == "add":
+        context.user_data["gmail_form"] = {"step": "address"}
+        await query.message.reply_text("Ketik alamat Gmail yang mau ditambahkan (atau ketik batal):")
+        return
+    if parts[0] == "delok":
+        address = context.user_data.pop("gmail_delete", None)
+        if address:
+            gmail_accounts.remove(address)
+            await query.message.reply_text(f"🗑️ {address} dihapus.")
+        text, markup = accounts_view(load_user(uid))
+        await safe_edit(query.message, text, markup)
+        return
+
+    accounts = gmail_accounts.load()
+    i = int(parts[0])
+    if i >= len(accounts):
+        text, markup = accounts_view(data)
+        await safe_edit(query.message, "Daftar akun sudah berubah, pilih lagi.\n\n" + text, markup)
+        return
+    account = accounts[i]
+    action = parts[1] if len(parts) > 1 else ""
+    if action == "def":
+        update_user(uid, lambda d: d.__setitem__("gmail_default", account.address))
+        data = load_user(uid)
+    elif action == "pw" and not account.from_env:
+        context.user_data["gmail_form"] = {"step": "password", "address": account.address, "edit": True}
+        await query.message.reply_text(ADD_ACCOUNT_HELP.format(address=account.address))
+        return
+    elif action == "del" and not account.from_env:
+        context.user_data["gmail_delete"] = account.address
+        await safe_edit(query.message,
+                        f"Hapus {account.address} dari bot?\n\nLamaran yang dikirim dari akun ini tidak "
+                        f"bisa dicek balasannya atau di-follow-up sampai akunnya ditambahkan lagi.",
+                        kb([("🗑️ Ya, hapus", "acc:delok"), ("❌ Batal", f"acc:{i}")]))
+        return
+    text, markup = account_detail_view(data, i, account)
+    await safe_edit(query.message, text, markup)
+
+
+async def handle_gmail_form(message, context, uid: int, text: str):
+    """Isian tambah akun / ganti app password, satu langkah per pesan."""
+    form = context.user_data["gmail_form"]
+    if text.lower() == "batal":
+        context.user_data["gmail_form"] = None
+        await message.reply_text("Dibatalkan.")
+        return
+
+    if form["step"] == "address":
+        address = text.lower()
+        if not EMAIL_RE.match(address):
+            await message.reply_text("Format email tidak valid, coba lagi (atau ketik batal).")
+            return
+        if gmail_accounts.get(address):
+            await message.reply_text(f"{address} sudah terdaftar. Pilih akunnya di 📧 Akun Gmail untuk "
+                                     "mengganti app password.")
+            context.user_data["gmail_form"] = None
+            return
+        form.update({"step": "password", "address": address, "edit": False})
+        await message.reply_text(ADD_ACCOUNT_HELP.format(address=address))
+        return
+
+    # langkah password: hapus pesannya dari chat secepatnya. Setelah itu kirim pesan baru,
+    # bukan reply, karena pesan yang dibalas sudah tidak ada.
+    password = text.replace(" ", "")
+    try:
+        await message.delete()
+    except BadRequest:
+        log.warning("pesan berisi app password tidak bisa dihapus")
+    if not APP_PASSWORD_RE.fullmatch(password):
+        await context.bot.send_message(message.chat_id, "App password harus 16 huruf. Coba kirim lagi (atau ketik batal).")
+        return
+    address = form["address"]
+    msg = await context.bot.send_message(message.chat_id, f"⏳ Mencoba login ke {address}...")
+    try:
+        await asyncio.to_thread(gmail_accounts.verify, address, password)
+    except Exception as e:
+        log.info("verifikasi akun %s gagal: %s", address, e)
+        await msg.edit_text(f"❌ Login ke {address} gagal: {e}\n\nPastikan app password benar dan IMAP aktif "
+                            "(Gmail > Setelan > Penerusan dan POP/IMAP). Kirim app password lagi, atau ketik batal.")
+        return
+    gmail_accounts.save(address, password)
+    context.user_data["gmail_form"] = None
+    text, markup = accounts_view(load_user(uid))
+    await msg.edit_text(f"✅ {address} {'diperbarui' if form['edit'] else 'ditambahkan'}.\n\n" + text,
+                        reply_markup=markup)
 
 
 async def btn_lamaran_list(query, context, uid, data, arg):
@@ -954,7 +1076,8 @@ async def btn_followup_send(query, context, uid, data, arg):
     account = gmail_accounts.get(app.get("dari"))
     if not account:
         await query.message.reply_text(
-            f"Akun Gmail pengirim lamaran ini ({app.get('dari')}) tidak ada di .env." if app.get("dari")
+            f"Akun Gmail pengirim lamaran ini ({app.get('dari')}) sudah tidak terdaftar. Tambahkan lagi "
+            f"lewat ⚙️ Pengaturan > 📧 Akun Gmail." if app.get("dari")
             else GMAIL_MISSING)
         return
     await query.edit_message_reply_markup(None)
@@ -1061,7 +1184,7 @@ async def btn_confirm_send(query, context, uid, data, arg):
     accounts = gmail_accounts.load()
     idx = int(arg or 0)
     if idx >= len(accounts):
-        await query.message.reply_text("Akun Gmail tidak ditemukan. Cek .env lalu coba kirim lagi.")
+        await query.message.reply_text("Daftar akun Gmail sudah berubah. Tekan 📧 Kirim via Gmail lagi.")
         return
     account = accounts[idx]
     job = context.user_data["job"]
@@ -1074,7 +1197,8 @@ async def btn_confirm_send(query, context, uid, data, arg):
             context.user_data["cover_letter"], attachment_path(context, uid))
     except Exception as e:
         log.exception("kirim email gagal")
-        await msg.edit_text(f"Gagal mengirim: {e}\nCek alamat dan app password {account.address} di .env")
+        where = "file .env" if account.from_env else "⚙️ Pengaturan > 📧 Akun Gmail"
+        await msg.edit_text(f"Gagal mengirim: {e}\nCek app password {account.address} di {where}.")
         return
     info = {
         "posisi": job.get("posisi"), "perusahaan": job.get("perusahaan"), "ke": recipient,
@@ -1105,7 +1229,7 @@ async def btn_cancel_send(query, context, uid, data, arg):
 
 
 BUTTONS = {
-    "skip": btn_skip, "gaya": btn_gaya, "set": btn_settings, "lamlist": btn_lamaran_list,
+    "skip": btn_skip, "gaya": btn_gaya, "set": btn_settings, "acc": btn_accounts, "lamlist": btn_lamaran_list,
     "app": btn_app_detail, "st": btn_status,
     "str": lambda *a: btn_status(*a, new_message=True),
     "fu": btn_followup_draft, "fusend": btn_followup_send, "fucancel": btn_followup_cancel,

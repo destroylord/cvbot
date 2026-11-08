@@ -1,5 +1,30 @@
 # Changelog
 
+## 2026-11-09 (lanjutan): kelola akun Gmail dari bot
+
+Akun Gmail tidak perlu lagi ditulis di `.env`. Semua bisa dari Telegram:
+**⚙️ Pengaturan > 📧 Akun Gmail**.
+
+- **Tambah akun**: ketik alamat, lalu app password. Bot mencoba login IMAP dan SMTP dulu, dan akun
+  hanya disimpan kalau login berhasil. Pesan berisi password langsung dihapus dari chat, dan password
+  tidak disimpan di state percakapan bot.
+- **Ganti app password**, **hapus akun** (dengan konfirmasi), dan **jadikan default**.
+- Disimpan di `data/gmail_accounts.json` dengan izin file `600` di Linux.
+- Akun di `.env` tetap jalan (ditandai `(.env)`), tapi hanya bisa diubah lewat `.env`.
+- Kelola akun hanya aktif kalau `ALLOWED_USER_IDS` diisi, supaya orang lain tidak bisa melihat
+  atau mengubah akun kamu.
+- Pesan error yang dulu menyuruh cek `.env` sekarang menunjuk ke menu yang tepat. Lamaran dari akun yang
+  sudah dihapus memberi pesan jelas saat follow-up.
+- `GMAIL_ADDRESS` / `GMAIL_APP_PASSWORD` di `.env.example` sekarang opsional (dikomentari).
+- README: bagian baru **Kelola akun Gmail** dan **Alur foto lowongan**.
+
+Diuji dengan 31 pengecekan otomatis memakai Telegram dan Gmail palsu: tambah, salah format, login gagal,
+duplikat, batal, default, ganti password, akun `.env` terlindungi, kirim lamaran dari akun baru, hapus,
+follow-up setelah akun dihapus, dan penolakan tanpa `ALLOWED_USER_IDS`.
+
+**Upgrade**: `git pull && ./bot.sh restart`. `.env` lama tetap jalan tanpa diubah.
+
+
 ## 2026-11-09
 
 ### Ringkasan
