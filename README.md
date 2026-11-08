@@ -58,35 +58,38 @@ bukan dimasukkan ke CV. Tetap baca CV hasilnya sebelum mengirim.
 6. **Aktifkan job alert** di JobStreet, Glints, LinkedIn, dll. dengan email Gmail yang sama.
    Atur kata kunci dan lokasi sesuai posisi yang kamu incar.
 7. Salin `.env.example` menjadi `.env`, lalu isi semua nilainya.
-8. Jalankan:
-   ```
-   python bot.py
-   ```
-   Bot harus tetap berjalan supaya cek harian bisa jalan.
+8. Jalankan `python bot.py` untuk mencoba. Bot harus tetap berjalan supaya cek harian bisa jalan,
+   jadi untuk pemakaian sehari-hari jalankan di VPS (lihat bagian berikut).
 
-## Jalan otomatis di background (Windows)
+## Jalan di VPS (Linux, background)
 
-Supaya tidak perlu menjalankan `python bot.py` setiap kali, buka PowerShell di folder ini lalu:
+Di VPS (contoh Ubuntu/Debian), sekali saja:
 
 ```
-.\bot.ps1 install
+sudo apt install -y python3 python3-venv git
+git clone https://github.com/destroylord/cvbot.git
+cd cvbot
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cp .env.example .env && nano .env      # isi token, ID Telegram, API key AI, akun Gmail
+.venv/bin/python bot.py                # tes dulu di depan; kalau sudah jalan, Ctrl+C
+chmod +x bot.sh
+./bot.sh install
 ```
 
-Bot langsung jalan tanpa jendela, otomatis start setiap kamu login Windows, dan restart sendiri
-kalau crash. Perintah lain:
+`./bot.sh install` memasang bot sebagai service systemd: jalan di background, otomatis start
+setiap VPS reboot, dan restart sendiri kalau crash. Terminal SSH boleh ditutup. Perintah lain:
 
-- `.\bot.ps1 status` - cek bot jalan atau tidak + 10 baris log terakhir
-- `.\bot.ps1 log` - lihat log secara langsung (Ctrl+C untuk keluar), file-nya di `data\bot.log`
-- `.\bot.ps1 restart` - wajib setelah mengubah `.env` atau kode
-- `.\bot.ps1 stop` / `.\bot.ps1 start`
-- `.\bot.ps1 uninstall` - hentikan dan hapus dari autostart
+- `./bot.sh status` - cek bot jalan atau tidak + 10 baris log terakhir
+- `./bot.sh log` - lihat log langsung (Ctrl+C untuk keluar); log juga tersimpan di `data/bot.log`
+- `./bot.sh restart` - wajib setelah mengubah `.env` atau kode
+- `./bot.sh stop` / `./bot.sh start`
+- `./bot.sh uninstall` - hentikan dan hapus service
 
-Kalau muncul error "running scripts is disabled", jalankan sekali:
-`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+Update ke versi terbaru: `git pull && .venv/bin/pip install -r requirements.txt && ./bot.sh restart`.
 
-Bot hanya jalan selama komputer menyala dan kamu login. Jangan jalankan `python bot.py` manual
-saat versi background aktif, karena dua bot dengan token yang sama akan saling bentrok.
-Kalau mau benar-benar 24 jam, jalankan di VPS.
+Jangan jalankan `python bot.py` manual saat service aktif, dan jangan jalankan bot yang sama
+di laptop sekaligus. Dua bot dengan token yang sama akan saling bentrok.
 
 ## Perintah
 

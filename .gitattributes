@@ -1,0 +1,2 @@
+# Skrip shell harus LF supaya bisa dijalankan di Linux walau di-commit dari Windows
+*.sh text eol=lf
