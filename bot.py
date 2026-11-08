@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import sys
+import time
 from functools import wraps
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -27,6 +28,7 @@ from telegram.ext import (  # noqa: E402
 )
 
 import ai_helper  # noqa: E402
+import app_settings  # noqa: E402
 import cv_builder  # noqa: E402
 import cv_parser  # noqa: E402
 import gmail_accounts  # noqa: E402
@@ -283,14 +285,16 @@ def settings_view(data: dict):
     accounts = gmail_accounts.load()
     default = default_account(data)
     onoff = {key: "Aktif" if data.get(key, True) else "Mati" for key in TOGGLES}
+    ai = ai_helper.PROVIDERS.get(ai_helper.provider(), {})
     text = (f"⚙️ Pengaturan\n\n"
+            f"AI: {ai.get('label', ai_helper.provider()).split(' (')[0]} · {ai_helper.current_model() or '-'}\n"
             f"Gaya cover letter: {GAYA_LABEL.get(data.get('gaya', 'formal'))}\n"
             f"Akun Gmail default: {default.address if default else 'belum ada'}"
             f"{f' ({len(accounts)} akun terhubung)' if len(accounts) > 1 else ''}\n"
             f"Rekomendasi harian jam {DAILY_CHECK_TIME}: {onoff['auto_rekomendasi']}\n"
             f"Cek balasan HR tiap {REPLY_CHECK_MINUTES} menit: {onoff['auto_balasan']}\n\n"
             f"Jam dan ambang skor diatur di file .env.")
-    rows = [[("✍️ Gaya cover letter", "set:gaya")], [("📧 Akun Gmail", "acc")]]
+    rows = [[("🤖 Model AI", "ai")], [("✍️ Gaya cover letter", "set:gaya")], [("📧 Akun Gmail", "acc")]]
     rows += [[(f"{label}: {'ON ✅' if data.get(key, True) else 'OFF ⛔'}", f"set:tog:{key}")]
              for key, label in TOGGLES.items()]
     return text, kb(*rows)
@@ -781,12 +785,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
 
     if text in MENU_ACTIONS:
-        context.user_data.update({"awaiting_email": False, "gmail_form": None})
+        context.user_data.update({"awaiting_email": False, "gmail_form": None, "ai_form": None})
         await MENU_ACTIONS[text](update, context)
         return
 
     if context.user_data.get("gmail_form"):
         await handle_gmail_form(update.message, context, uid, text)
+        return
+
+    if context.user_data.get("ai_form"):
+        await handle_ai_form(update.message, context, uid, text)
         return
 
     if context.user_data.get("awaiting_email"):
@@ -1015,6 +1023,171 @@ async def handle_gmail_form(message, context, uid: int, text: str):
                         reply_markup=markup)
 
 
+# Setting yang dipilih dari daftar model: kode di callback_data -> nama setting
+MODEL_TARGETS = {
+    "m": lambda: ai_helper.PROVIDERS[ai_helper.provider()]["model"],
+    "f": lambda: "GEMINI_FALLBACK_MODELS",
+    "v": lambda: "OLLAMA_VISION_MODEL",
+}
+MODEL_TARGET_LABEL = {"m": "model utama", "f": "model cadangan", "v": "model untuk membaca foto"}
+MAX_MODEL_BUTTONS = 30
+
+
+def ai_view(note: str = ""):
+    name = ai_helper.provider()
+    info = ai_helper.PROVIDERS.get(name)
+    if not info:
+        return (f"{note}🤖 Model AI\n\nProvider '{name}' tidak dikenal. Pilih provider.",
+                kb([("🔁 Pilih provider", "ai:prov")], [("⬅️ Pengaturan", "set:back")]))
+    lines = [f"Provider: {info['label']}", f"Model: {ai_helper.current_model() or '-'}"]
+    rows = [[("🔁 Ganti provider", "ai:prov")], [("🧠 Pilih model", "ai:model")]]
+    if name == "gemini":
+        lines.append(f"Cadangan saat sibuk: {ai_helper.setting('GEMINI_FALLBACK_MODELS') or 'tidak ada'}")
+        rows.append([("🛟 Model cadangan", "ai:fb")])
+    if name == "ollama":
+        lines += [f"Alamat: {ai_helper.setting('OLLAMA_URL')}",
+                  f"Model untuk foto: {ai_helper.setting('OLLAMA_VISION_MODEL')}"]
+        rows.append([("🖼️ Model untuk foto", "ai:vis")])
+    if info["key"]:
+        lines.append(f"API key: {app_settings.masked(ai_helper.setting(info['key']))}")
+        rows.append([("🔑 Ganti API key", "ai:key")])
+    rows += [[("🧪 Tes AI", "ai:test")], [("⬅️ Pengaturan", "set:back")]]
+    return f"{note}🤖 Model AI\n\n" + "\n".join(lines), kb(*rows)
+
+
+def api_key_prompt(name: str) -> str:
+    info = ai_helper.PROVIDERS[name]
+    return (f"Kirim API key {name.capitalize()} kamu.\nBuat di: {info['key_url']}\n\n"
+            "Pesan berisi API key akan langsung aku hapus dari chat. Ketik batal untuk membatalkan.")
+
+
+async def btn_ai(query, context, uid, data, arg):
+    """ai, ai:prov[:<nama>], ai:model|fb|vis, ai:set:<kode>:<i|none>, ai:type:<kode>, ai:key, ai:test"""
+    if not ALLOWED:
+        await query.message.reply_text("Isi ALLOWED_USER_IDS di .env dulu supaya orang lain tidak bisa "
+                                       "melihat atau mengubah pengaturan AI dan API key kamu.")
+        return
+    parts = arg.split(":") if arg else []
+    cmd = parts[0] if parts else ""
+
+    if cmd == "prov" and len(parts) == 1:
+        current = ai_helper.provider()
+        rows = [[(f"{'✅ ' if key == current else ''}{info['label']}", f"ai:prov:{key}")]
+                for key, info in ai_helper.PROVIDERS.items()]
+        await safe_edit(query.message, "Pilih provider AI:", kb(*rows, [("⬅️ Kembali", "ai")]))
+        return
+    if cmd == "prov":
+        name = parts[1]
+        if name not in ai_helper.PROVIDERS:
+            return
+        app_settings.set("AI_PROVIDER", name)
+        key = ai_helper.PROVIDERS[name]["key"]
+        if key and not ai_helper.setting(key):
+            context.user_data["ai_form"] = {"step": "key", "provider": name}
+            await safe_edit(query.message, *ai_view(f"✅ Provider diganti ke {name.capitalize()}.\n\n"))
+            await query.message.reply_text(api_key_prompt(name))
+            return
+        await safe_edit(query.message, *ai_view(f"✅ Provider diganti ke {name.capitalize()}.\n\n"))
+        return
+
+    if cmd in ("model", "fb", "vis"):
+        code = {"model": "m", "fb": "f", "vis": "v"}[cmd]
+        await safe_edit(query.message, "⏳ Mengambil daftar model dari provider...")
+        try:
+            models = await asyncio.to_thread(ai_helper.list_models, ai_helper.provider())
+        except Exception as e:
+            log.info("gagal mengambil daftar model: %s", e)
+            await safe_edit(query.message, f"Gagal mengambil daftar model: {e}",
+                            kb([("✏️ Ketik nama model", f"ai:type:{code}")], [("⬅️ Kembali", "ai")]))
+            return
+        models = models[:MAX_MODEL_BUTTONS]
+        context.user_data["ai_models"] = models
+        current = ai_helper.setting(MODEL_TARGETS[code]())
+        rows = [[(f"{'✅ ' if m == current else ''}{m}", f"ai:set:{code}:{i}")] for i, m in enumerate(models)]
+        if code == "f":
+            rows.append([("🚫 Tanpa cadangan", "ai:set:f:none")])
+        rows += [[("✏️ Ketik nama model", f"ai:type:{code}")], [("⬅️ Kembali", "ai")]]
+        text = (f"Pilih {MODEL_TARGET_LABEL[code]} ({len(models)} model tersedia untuk API key kamu):"
+                if models else "Provider tidak mengembalikan model apa pun. Ketik nama model secara manual.")
+        await safe_edit(query.message, text, kb(*rows))
+        return
+
+    if cmd == "set":
+        code, choice = parts[1], parts[2]
+        models = context.user_data.get("ai_models") or []
+        if choice != "none" and int(choice) >= len(models):
+            await safe_edit(query.message, *ai_view("Daftar model sudah kedaluwarsa, pilih lagi.\n\n"))
+            return
+        value = "" if choice == "none" else models[int(choice)]
+        app_settings.set(MODEL_TARGETS[code](), value)
+        await safe_edit(query.message, *ai_view(
+            f"✅ {MODEL_TARGET_LABEL[code].capitalize()}: {value or 'tidak ada'}. Tekan 🧪 Tes AI untuk mencoba.\n\n"))
+        return
+
+    if cmd == "type":
+        context.user_data["ai_form"] = {"step": "model", "target": parts[1]}
+        await query.message.reply_text(f"Ketik nama {MODEL_TARGET_LABEL[parts[1]]} (atau ketik batal):")
+        return
+
+    if cmd == "key":
+        context.user_data["ai_form"] = {"step": "key", "provider": ai_helper.provider()}
+        await query.message.reply_text(api_key_prompt(ai_helper.provider()))
+        return
+
+    if cmd == "test":
+        await safe_edit(query.message, f"⏳ Mengetes {ai_helper.provider()} · {ai_helper.current_model()}...")
+        started = time.monotonic()
+        try:
+            answer = await asyncio.to_thread(ai_helper.ping)
+            note = f"✅ AI menjawab dalam {time.monotonic() - started:.1f} detik: \"{answer[:40]}\"\n\n"
+        except Exception as e:
+            note = f"❌ Tes gagal: {e}\n\n"
+        await safe_edit(query.message, *ai_view(note))
+        return
+
+    await safe_edit(query.message, *ai_view())
+
+
+async def handle_ai_form(message, context, uid: int, text: str):
+    """Isian API key / nama model yang diketik manual."""
+    form = context.user_data["ai_form"]
+    if text.lower() == "batal":
+        context.user_data["ai_form"] = None
+        await message.reply_text("Dibatalkan.")
+        return
+
+    if form["step"] == "model":
+        context.user_data["ai_form"] = None
+        name = MODEL_TARGETS[form["target"]]()
+        app_settings.set(name, text.strip())
+        reply, markup = ai_view(f"✅ {MODEL_TARGET_LABEL[form['target']].capitalize()}: {text.strip()}. "
+                                f"Tekan 🧪 Tes AI untuk mencoba.\n\n")
+        await message.reply_text(reply, reply_markup=markup)
+        return
+
+    # langkah API key: hapus pesannya dari chat, lalu kirim pesan baru (bukan reply)
+    try:
+        await message.delete()
+    except BadRequest:
+        log.warning("pesan berisi API key tidak bisa dihapus")
+    provider, key = form["provider"], text.strip()
+    msg = await context.bot.send_message(message.chat_id, f"⏳ Memeriksa API key {provider.capitalize()}...")
+    try:
+        models = await asyncio.to_thread(ai_helper.list_models, provider, key)
+    except Exception as e:
+        log.info("API key %s ditolak: %s", provider, e)
+        await msg.edit_text(f"❌ {e}\nKirim API key lagi, atau ketik batal.")
+        return
+    app_settings.set(ai_helper.PROVIDERS[provider]["key"], key)
+    context.user_data["ai_form"] = None
+    note = f"✅ API key {provider.capitalize()} disimpan ({len(models)} model tersedia).\n"
+    if ai_helper.provider() == provider and models and ai_helper.current_model() not in models:
+        note += (f"⚠️ Model sekarang ({ai_helper.current_model()}) tidak ada di daftar model API key ini. "
+                 f"Pilih lewat 🧠 Pilih model.\n")
+    reply, markup = ai_view(note + "\n")
+    await msg.edit_text(reply, reply_markup=markup)
+
+
 async def btn_lamaran_list(query, context, uid, data, arg):
     text, markup = lamaran_list_view(data)
     await safe_edit(query.message, text, markup)
@@ -1241,7 +1414,8 @@ async def btn_cancel_send(query, context, uid, data, arg):
 
 
 BUTTONS = {
-    "skip": btn_skip, "gaya": btn_gaya, "set": btn_settings, "acc": btn_accounts, "lamlist": btn_lamaran_list,
+    "skip": btn_skip, "gaya": btn_gaya, "set": btn_settings, "acc": btn_accounts, "ai": btn_ai,
+    "lamlist": btn_lamaran_list,
     "app": btn_app_detail, "st": btn_status,
     "str": lambda *a: btn_status(*a, new_message=True),
     "fu": btn_followup_draft, "fusend": btn_followup_send, "fucancel": btn_followup_cancel,

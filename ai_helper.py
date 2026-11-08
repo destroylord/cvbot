@@ -1,6 +1,6 @@
 """Semua yang berhubungan dengan AI: parsing CV, analisis lowongan, tailoring CV, cover letter.
 
-Provider AI dipilih lewat AI_PROVIDER di .env:
+Provider, model, dan API key diatur dari bot (⚙️ Pengaturan > 🤖 Model AI), atau dari .env:
   gemini -> Google Gemini API (ada kuota gratis, key dari https://aistudio.google.com)
   ollama -> model lokal gratis di komputer sendiri (https://ollama.com)
   claude -> Claude API (berbayar, key dari https://console.anthropic.com)
@@ -8,26 +8,54 @@ Provider AI dipilih lewat AI_PROVIDER di .env:
 import base64
 import json
 import logging
-import os
 import re
 import time
 
 import requests
 
+import app_settings
+
 log = logging.getLogger("cvbot.ai")
+
+DEFAULTS = {
+    "AI_PROVIDER": "gemini", "GEMINI_MODEL": "gemini-2.5-flash", "GEMINI_FALLBACK_MODELS": "gemini-2.5-flash-lite",
+    "CLAUDE_MODEL": "claude-sonnet-5-5", "OLLAMA_URL": "http://localhost:11434",
+    "OLLAMA_MODEL": "qwen2.5:7b", "OLLAMA_VISION_MODEL": "qwen2.5vl:7b",
+}
+PROVIDERS = {
+    "gemini": {"label": "Gemini (Google, ada kuota gratis)", "model": "GEMINI_MODEL", "key": "GEMINI_API_KEY",
+               "key_url": "https://aistudio.google.com/apikey"},
+    "claude": {"label": "Claude (Anthropic, berbayar)", "model": "CLAUDE_MODEL", "key": "ANTHROPIC_API_KEY",
+               "key_url": "https://console.anthropic.com/settings/keys"},
+    "ollama": {"label": "Ollama (lokal, gratis)", "model": "OLLAMA_MODEL", "key": None, "key_url": None},
+}
+SETUP_HINT = "Atur di ⚙️ Pengaturan > 🤖 Model AI."
+
+
+def setting(name: str) -> str:
+    return app_settings.get(name, DEFAULTS.get(name, "")).strip()
+
+
+def provider() -> str:
+    return setting("AI_PROVIDER").lower()
+
+
+def current_model() -> str:
+    info = PROVIDERS.get(provider())
+    return setting(info["model"]) if info else ""
 
 
 def _ask(system: str, prompt: str, max_tokens: int = 2000, image: tuple[bytes, str] | None = None) -> str:
     """image: (isi file, mime type), misalnya poster lowongan."""
-    provider = os.getenv("AI_PROVIDER", "gemini").strip().lower()
-    if provider == "gemini":
+    name = provider()
+    if name == "gemini":
         text = _ask_gemini(system, prompt, image)
-    elif provider == "ollama":
+    elif name == "ollama":
         text = _ask_ollama(system, prompt, image)
-    elif provider == "claude":
+    elif name == "claude":
         text = _ask_claude(system, prompt, max_tokens, image)
     else:
-        raise ValueError(f"AI_PROVIDER tidak dikenal: {provider} (pilih gemini, ollama, atau claude)")
+        raise ValueError(f"Provider AI tidak dikenal: {name}. {SETUP_HINT}")
     # Beberapa model lokal menulis proses berpikirnya di <think>...</think>, buang bagian itu
     return re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
 
@@ -47,8 +75,8 @@ class _GeminiUnavailable(Exception):
 
 
 def _gemini_models() -> list[str]:
-    primary = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
-    fallbacks = os.getenv("GEMINI_FALLBACK_MODELS", "gemini-2.5-flash-lite").split(",")
+    primary = setting("GEMINI_MODEL")
+    fallbacks = setting("GEMINI_FALLBACK_MODELS").split(",")
     return list(dict.fromkeys([primary] + [m.strip() for m in fallbacks if m.strip()]))
 
 
@@ -68,14 +96,14 @@ def _ask_gemini(system: str, prompt: str, image: tuple[bytes, str] | None = None
     if all(f.status == 429 for f in failures):
         raise RuntimeError("Kuota gratis Gemini habis untuk sementara. Tunggu sebentar lalu coba lagi.")
     if all(f.status == 404 for f in failures):
-        raise RuntimeError(f"Model Gemini tidak ditemukan. Cek GEMINI_MODEL di .env ({failures[0]}).")
+        raise RuntimeError(f"Model Gemini tidak ditemukan ({failures[0]}). Pilih model lain: {SETUP_HINT}")
     raise RuntimeError("Server Gemini sedang sibuk dan sudah dicoba beberapa kali. "
                        "Biasanya hanya sebentar, coba lagi beberapa menit lagi.")
 
 
 def _gemini_request(model: str, body: dict) -> str:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    headers = {"x-goog-api-key": os.environ["GEMINI_API_KEY"], "Content-Type": "application/json"}
+    headers = {"x-goog-api-key": _api_key("gemini"), "Content-Type": "application/json"}
     last = None
     for delay in (0,) + GEMINI_RETRY_DELAYS:
         time.sleep(delay)
@@ -101,12 +129,12 @@ def _gemini_request(model: str, body: dict) -> str:
 
 
 def _ask_ollama(system: str, prompt: str, image: tuple[bytes, str] | None = None) -> str:
-    base = os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/")
+    base = setting("OLLAMA_URL").rstrip("/")
     user_msg = {"role": "user", "content": prompt}
-    model = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
+    model = setting("OLLAMA_MODEL")
     if image:
         # Model teks biasa tidak bisa membaca gambar, pakai model vision
-        model = os.getenv("OLLAMA_VISION_MODEL", "qwen2.5vl:7b")
+        model = setting("OLLAMA_VISION_MODEL")
         user_msg["images"] = [base64.b64encode(image[0]).decode()]
     resp = requests.post(
         f"{base}/api/chat",
@@ -123,25 +151,79 @@ def _ask_ollama(system: str, prompt: str, image: tuple[bytes, str] | None = None
     return resp.json()["message"]["content"]
 
 
-_claude_client = None
+_claude_clients = {}  # per API key, supaya ganti key dari bot langsung berlaku
+
+
+def _claude_client(api_key: str):
+    try:
+        from anthropic import Anthropic  # hanya di-import kalau memang pakai Claude
+    except ImportError as e:
+        raise RuntimeError("Library anthropic belum ter-install. Di VPS jalankan: "
+                           ".venv/bin/pip install anthropic, lalu ./bot.sh restart") from e
+    if api_key not in _claude_clients:
+        _claude_clients[api_key] = Anthropic(api_key=api_key)
+    return _claude_clients[api_key]
 
 
 def _ask_claude(system: str, prompt: str, max_tokens: int, image: tuple[bytes, str] | None = None) -> str:
-    global _claude_client
-    from anthropic import Anthropic  # hanya di-import kalau memang pakai Claude
-    if _claude_client is None:
-        _claude_client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    client = _claude_client(_api_key("claude"))
     content = [{"type": "text", "text": prompt}]
     if image:
         content.insert(0, {"type": "image", "source": {
             "type": "base64", "media_type": image[1], "data": base64.b64encode(image[0]).decode()}})
-    resp = _claude_client.messages.create(
-        model=os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5"),
+    resp = client.messages.create(
+        model=setting("CLAUDE_MODEL"),
         max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": content}],
     )
     return "".join(b.text for b in resp.content if b.type == "text")
+
+
+def _api_key(name: str) -> str:
+    key = setting(PROVIDERS[name]["key"])
+    if not key:
+        raise RuntimeError(f"API key {name.capitalize()} belum diisi. {SETUP_HINT}")
+    return key
+
+
+# ---------------------------------------------------------------- pengaturan AI dari bot
+NON_TEXT_MODELS = ("embedding", "tts", "image", "audio", "live", "native")
+
+
+def list_models(name: str, api_key: str | None = None) -> list[str]:
+    """Daftar model yang tersedia langsung dari provider. Sekaligus memeriksa API key."""
+    if name == "gemini":
+        resp = requests.get("https://generativelanguage.googleapis.com/v1beta/models",
+                            headers={"x-goog-api-key": api_key or _api_key("gemini")},
+                            params={"pageSize": 1000}, timeout=30)
+        if resp.status_code in (400, 401, 403):
+            raise RuntimeError("API key Gemini tidak valid.")
+        if not resp.ok:
+            raise RuntimeError(f"Gemini error {resp.status_code}: {resp.text[:200]}")
+        names = {m["name"].removeprefix("models/") for m in resp.json().get("models") or []
+                 if "generateContent" in (m.get("supportedGenerationMethods") or [])}
+        return sorted((n for n in names if n.startswith("gemini") and not any(x in n for x in NON_TEXT_MODELS)),
+                      reverse=True)
+    if name == "claude":
+        import anthropic
+        try:
+            return [m.id for m in _claude_client(api_key or _api_key("claude")).models.list(limit=100)]
+        except anthropic.AuthenticationError as e:
+            raise RuntimeError("API key Claude tidak valid.") from e
+    if name == "ollama":
+        base = setting("OLLAMA_URL").rstrip("/")
+        try:
+            resp = requests.get(f"{base}/api/tags", timeout=10)
+        except requests.RequestException as e:
+            raise RuntimeError(f"Ollama tidak bisa dihubungi di {base}. Pastikan Ollama jalan.") from e
+        return sorted(m["name"] for m in resp.json().get("models") or [])
+    raise ValueError(f"Provider tidak dikenal: {name}")
+
+
+def ping() -> str:
+    """Tes singkat: AI dengan pengaturan sekarang bisa menjawab atau tidak."""
+    return _ask("Kamu sedang dites koneksinya.", "Balas hanya dengan kata: OK", max_tokens=20)
 
 
 def _parse_json(text: str) -> dict:

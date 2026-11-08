@@ -1,5 +1,32 @@
 # Changelog
 
+## 2026-11-09 (lanjutan): atur Model AI dari bot
+
+Provider, model, dan API key AI tidak perlu lagi diatur di `.env`. Semua ada di
+**⚙️ Pengaturan > 🤖 Model AI**:
+
+- **Ganti provider** (Gemini / Claude / Ollama). Kalau API key-nya belum ada, bot langsung memintanya.
+- **Pilih model dari daftar** yang diambil langsung dari provider, jadi tidak perlu menebak nama model.
+  Untuk Gemini, hanya model teks yang ditampilkan (model embedding, TTS, gambar, dan live disaring).
+  Bisa juga mengetik nama model sendiri.
+- **Model cadangan** Gemini dan **model untuk foto** Ollama juga bisa dipilih dari daftar.
+- **API key** dicek dulu ke provider sebelum disimpan. Pesannya dihapus dari chat dan hanya 4 karakter
+  terakhir yang ditampilkan. Kalau model yang sedang dipakai tidak tersedia untuk key tersebut, bot memberi
+  peringatan.
+- **🧪 Tes AI** untuk memastikan pengaturan jalan, lengkap dengan waktu respons.
+- Disimpan di `data/settings.json` (`chmod 600`) dan langsung berlaku tanpa restart. Urutannya: pengaturan
+  dari bot, lalu `.env`, lalu nilai default. Jadi `.env` lama tetap jalan.
+- Menu hanya aktif kalau `ALLOWED_USER_IDS` diisi.
+- `.env` sekarang cukup berisi `TELEGRAM_BOT_TOKEN` dan `ALLOWED_USER_IDS`. Bagian AI di `.env.example`
+  dikomentari karena opsional.
+
+Diuji 35 pengecekan: urutan sumber pengaturan, pemanggilan AI memakai model & key dari bot, penyaringan
+daftar model, key salah, Ollama mati, library `anthropic` belum ter-install, seluruh alur menu, batal,
+indeks kedaluwarsa, tes AI, dan penolakan tanpa `ALLOWED_USER_IDS`. Ditemukan dan diperbaiki sebelum rilis:
+tombol sempat dikirim sebagai `parse_mode`, bukan `reply_markup`. Seluruh `bot.py` sudah dicek dan tidak ada
+panggilan lain dengan masalah yang sama.
+
+
 ## 2026-11-09 (lanjutan): Gemini sibuk (503) tidak langsung gagal
 
 Sebelumnya, saat server Gemini sedang ramai, bot langsung menampilkan error mentah

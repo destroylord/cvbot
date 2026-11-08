@@ -50,18 +50,13 @@ bukan dimasukkan ke CV. Tetap baca CV hasilnya sebelum mengirim.
    ```
 2. **Token bot**: chat @BotFather di Telegram, ketik `/newbot`, salin token-nya.
 3. **User ID kamu**: chat @userinfobot, salin angka ID-nya.
-4. **Pilih AI** (isi `AI_PROVIDER` di `.env`):
-   - `gemini` (disarankan, ada kuota gratis): login dengan akun Google di
-     https://aistudio.google.com/apikey, klik buat API key, salin ke `GEMINI_API_KEY`.
-     Kalau model default sudah tidak tersedia, ganti `GEMINI_MODEL` dengan nama model
-     yang tertera di AI Studio. Kalau Gemini sedang sibuk (error 503), bot otomatis mencoba ulang
-     beberapa kali lalu pindah ke model cadangan (`GEMINI_FALLBACK_MODELS`). Kalau tetap gagal,
-     tekan **🔄 Coba lagi** beberapa menit kemudian.
-   - `ollama` (gratis, offline): install dari https://ollama.com, lalu jalankan
-     `ollama pull qwen2.5:7b`. Butuh RAM sekitar 16 GB agar lancar, dan hasilnya
-     biasanya kurang bagus dibanding Gemini/Claude.
-   - `claude` (berbayar): key dari https://console.anthropic.com, isi `ANTHROPIC_API_KEY`.
-     Langganan Claude.ai tidak bisa dipakai untuk bot ini.
+4. **AI**: tidak perlu diisi di `.env`. Setelah bot jalan, buka **⚙️ Pengaturan > 🤖 Model AI**
+   (lihat [Pengaturan Model AI](#pengaturan-model-ai)). Pilihan provider:
+   - **Gemini** (disarankan, ada kuota gratis): API key dari https://aistudio.google.com/apikey.
+   - **Claude** (berbayar): API key dari https://console.anthropic.com. Langganan Claude.ai tidak bisa
+     dipakai untuk bot ini. Install juga library-nya di VPS: `.venv/bin/pip install anthropic`.
+   - **Ollama** (gratis, lokal): install dari https://ollama.com lalu `ollama pull qwen2.5:7b`. Butuh RAM
+     sekitar 16 GB, dan hasilnya biasanya kurang bagus dibanding Gemini/Claude.
 5. **Gmail App Password** (dipakai untuk kirim lamaran dan membaca job alert):
    - Aktifkan verifikasi 2 langkah di akun Google kamu.
    - Buka https://myaccount.google.com/apppasswords, buat app password baru, salin 16 karakternya.
@@ -84,7 +79,7 @@ git clone https://github.com/destroylord/cvbot.git
 cd cvbot
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-cp .env.example .env && nano .env      # isi token, ID Telegram, API key AI
+cp .env.example .env && nano .env      # cukup isi TELEGRAM_BOT_TOKEN dan ALLOWED_USER_IDS
 .venv/bin/python bot.py                # tes dulu di depan; kalau sudah jalan, Ctrl+C
 chmod +x bot.sh
 ./bot.sh install
@@ -103,6 +98,25 @@ Update ke versi terbaru: `git pull && .venv/bin/pip install -r requirements.txt 
 
 Jangan jalankan `python bot.py` manual saat service aktif, dan jangan jalankan bot yang sama
 di laptop sekaligus. Dua bot dengan token yang sama akan saling bentrok.
+
+## Pengaturan Model AI
+
+Buka **⚙️ Pengaturan > 🤖 Model AI**:
+
+- **🔁 Ganti provider**: Gemini, Claude, atau Ollama. Kalau API key provider itu belum ada, bot langsung
+  memintanya.
+- **🧠 Pilih model**: daftar model diambil langsung dari provider, jadi yang muncul pasti tersedia untuk
+  API key kamu. Bisa juga **✏️ Ketik nama model** secara manual.
+- **🛟 Model cadangan** (Gemini): dipakai otomatis kalau model utama sedang sibuk (503) atau kuotanya
+  habis (429). Pilih **🚫 Tanpa cadangan** untuk mematikannya.
+- **🖼️ Model untuk foto** (Ollama): model vision untuk membaca poster lowongan.
+- **🔑 Ganti API key**: key dicek dulu ke provider sebelum disimpan. Pesan berisi key langsung dihapus
+  dari chat, dan yang ditampilkan hanya 4 karakter terakhirnya.
+- **🧪 Tes AI**: kirim pertanyaan singkat ke AI untuk memastikan pengaturannya jalan, lengkap dengan waktu
+  responsnya.
+
+Disimpan di `data/settings.json` (hanya bisa dibaca pemilik file) dan langsung berlaku tanpa restart.
+Pengaturan dari bot mengalahkan nilai di `.env`. Menu ini hanya aktif kalau `ALLOWED_USER_IDS` diisi.
 
 ## Kelola akun Gmail
 
@@ -153,7 +167,7 @@ di samping kolom chat, jadi tidak perlu hafal perintahnya.
 - `/lamaran` - daftar lamaran, ubah status, buat follow-up
 - `/statistik` - statistik lamaran (tingkat respons, interview, per minggu)
 - `/cekbalasan` - cek balasan HR di Gmail sekarang
-- `/pengaturan` (atau `/config`) - gaya cover letter, kelola akun Gmail, nyala/matikan cek otomatis
+- `/pengaturan` (atau `/config`) - model AI, gaya cover letter, akun Gmail, nyala/matikan cek otomatis
 - `/gaya` - atur gaya cover letter (formal, santai, singkat)
 - `/profil` - lihat hasil scan CV
 - `/revisi <instruksi>` - revisi cover letter atau email follow-up terakhir
