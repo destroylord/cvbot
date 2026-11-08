@@ -344,6 +344,76 @@ async def rekomendasi(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ================================================================ rekomendasi
+async def fetch_new_alert_emails(accounts, seen: set) -> tuple[list[dict], list[str]]:
+    """Baca job alert baru dari semua akun. Mengembalikan (email, daftar pesan error per akun)."""
+    emails, failed = [], []
+    for account in accounts:
+        try:
+            found = await asyncio.to_thread(job_alerts.fetch_alert_emails, seen, LOOKBACK_DAYS, account)
+        except Exception as e:
+            log.exception("gagal membaca Gmail %s", account.address)
+            failed.append(f"{account.address}: {e}")
+            continue
+        # Job alert yang sama bisa masuk ke beberapa akun
+        known = {em["id"] for em in emails}
+        emails += [em for em in found if em["id"] not in known]
+    return emails, failed
+
+
+async def jobs_from_emails(profile: dict, emails: list[dict]) -> tuple[list[dict], list[str]]:
+    """Ambil & beri skor lowongan dari tiap email. Mengembalikan (lowongan, id email yang berhasil diproses)."""
+    jobs, processed = [], []
+    for em in emails:
+        try:
+            found = await asyncio.to_thread(ai_helper.extract_and_rank, profile, em["text"], em["from"])
+        except Exception:
+            log.exception("gagal memproses email %s", em["subject"])
+            continue  # tidak ditandai 'seen' supaya dicoba lagi nanti
+        for job in found:
+            ref = job.get("link_ref")
+            job["link"] = em["links"].get(ref) if ref else None
+            job["sumber"] = em["from"]
+            jobs.append(job)
+        processed.append(em["id"])
+    return jobs, processed
+
+
+def dedupe_jobs(jobs: list[dict]) -> list[dict]:
+    """Lowongan yang sama (posisi + perusahaan) dari beberapa email: simpan yang skornya tertinggi."""
+    unique = {}
+    for job in jobs:
+        key = (str(job.get("posisi")).lower(), str(job.get("perusahaan")).lower())
+        if key not in unique or (job.get("skor") or 0) > (unique[key].get("skor") or 0):
+            unique[key] = job
+    return list(unique.values())
+
+
+def top_jobs(jobs: list[dict]) -> list[dict]:
+    return sorted((j for j in jobs if (j.get("skor") or 0) >= MIN_REC_SCORE),
+                  key=lambda j: j.get("skor") or 0, reverse=True)[:MAX_RECS]
+
+
+def rec_id(job: dict) -> str:
+    return hashlib.md5(f"{job.get('posisi')}|{job.get('perusahaan')}|{job.get('link')}".encode()).hexdigest()[:10]
+
+
+def recommendations_message(top: list[dict]) -> tuple[str, list[list[InlineKeyboardButton]]]:
+    """Semua rekomendasi dalam satu pesan, satu baris tombol per lowongan."""
+    lines = [f"🎯 {len(top)} lowongan yang cocok dengan CV kamu:"]
+    rows = []
+    for i, job in enumerate(top, 1):
+        lines.append(f"\n{i}. {job.get('skor')}/100 · {job.get('posisi')}\n"
+                     f"🏢 {job.get('perusahaan')}" + (f" · {job.get('lokasi')}" if job.get("lokasi") else "") +
+                     f"\n💬 {(job.get('alasan') or '')[:160]}")
+        row = [InlineKeyboardButton(f"🔍 {i}. {str(job.get('posisi') or '')[:24]}",
+                                    callback_data=f"rec:{rec_id(job)}")]
+        link = job.get("link") or ""
+        if link.startswith("http"):
+            row.append(InlineKeyboardButton("🌐 Buka", url=link))
+        rows.append(row)
+    return "\n".join(lines)[:4000], rows
+
+
 async def send_recommendations(context, uid: int, chat_id: int, silent_if_empty: bool = False):
     bot = context.bot
     data = load_user(uid)
@@ -366,79 +436,35 @@ async def send_recommendations(context, uid: int, chat_id: int, silent_if_empty:
             chat_id, f"⏳ Mengecek email job alert di {len(accounts)} akun Gmail..."
             if len(accounts) > 1 else "⏳ Mengecek email job alert...")
     seen = list(data.get("gmail_seen") or [])
-    emails, failed = [], []
-    for account in accounts:
-        try:
-            found = await asyncio.to_thread(job_alerts.fetch_alert_emails, set(seen), LOOKBACK_DAYS, account)
-        except Exception as e:
-            log.exception("gagal membaca Gmail %s", account.address)
-            failed.append(f"{account.address}: {e}")
-            continue
-        # Job alert yang sama bisa masuk ke beberapa akun
-        known = {em["id"] for em in emails}
-        emails += [em for em in found if em["id"] not in known]
+    emails, failed = await fetch_new_alert_emails(accounts, set(seen))
     if failed:
         await say("Gagal membaca Gmail:\n" + "\n".join(failed))
         if len(failed) == len(accounts):
             await finish_progress(progress)
             return
 
-    jobs = []
-    for em in emails:
-        try:
-            found = await asyncio.to_thread(ai_helper.extract_and_rank, data["profile"], em["text"], em["from"])
-        except Exception:
-            log.exception("gagal memproses email %s", em["subject"])
-            continue  # tidak ditandai 'seen' supaya dicoba lagi nanti
-        for job in found:
-            ref = job.get("link_ref")
-            job["link"] = em["links"].get(ref) if ref else None
-            job["sumber"] = em["from"]
-            jobs.append(job)
-        seen.append(em["id"])
+    jobs, processed = await jobs_from_emails(data["profile"], emails)
+    update_user(uid, lambda d: d.__setitem__("gmail_seen", (seen + processed)[-500:]))
 
-    data = load_user(uid)
-    data["gmail_seen"] = seen[-500:]
-    save_user(uid, data)
-
-    unique = {}
-    for job in jobs:
-        key = (str(job.get("posisi")).lower(), str(job.get("perusahaan")).lower())
-        if key not in unique or (job.get("skor") or 0) > (unique[key].get("skor") or 0):
-            unique[key] = job
-    top = sorted((j for j in unique.values() if (j.get("skor") or 0) >= MIN_REC_SCORE),
-                 key=lambda j: j.get("skor") or 0, reverse=True)[:MAX_RECS]
-
+    unique = dedupe_jobs(jobs)
+    top = top_jobs(unique)
     if not top:
         await finish_progress(progress, f"Tidak ada rekomendasi baru dengan skor ≥ {MIN_REC_SCORE} "
                                         f"({len(emails)} email baru dicek, {len(unique)} lowongan ditemukan).")
         return
     await finish_progress(progress)
 
-    # Semua rekomendasi dalam satu pesan, satu baris tombol per lowongan
     recs = context.user_data.setdefault("recs", {})
-    lines = [f"🎯 {len(top)} lowongan yang cocok dengan CV kamu:"]
-    rows = []
-    for i, job in enumerate(top, 1):
-        rid = hashlib.md5(f"{job.get('posisi')}|{job.get('perusahaan')}|{job.get('link')}".encode()).hexdigest()[:10]
-        recs[rid] = job
-        lines.append(f"\n{i}. {job.get('skor')}/100 · {job.get('posisi')}\n"
-                     f"🏢 {job.get('perusahaan')}" + (f" · {job.get('lokasi')}" if job.get("lokasi") else "") +
-                     f"\n💬 {(job.get('alasan') or '')[:160]}")
-        row = [InlineKeyboardButton(f"🔍 {i}. {str(job.get('posisi') or '')[:24]}", callback_data=f"rec:{rid}")]
-        link = job.get("link") or ""
-        if link.startswith("http"):
-            row.append(InlineKeyboardButton("🌐 Buka", url=link))
-        rows.append(row)
-    text = "\n".join(lines)[:4000]
+    recs.update({rec_id(job): job for job in top})
+    while len(recs) > 50:
+        recs.pop(next(iter(recs)))
+    text, rows = recommendations_message(top)
     try:
         await bot.send_message(chat_id, text, reply_markup=InlineKeyboardMarkup(rows),
                                disable_notification=silent_if_empty)
     except BadRequest:  # biasanya karena ada link yang tidak valid untuk tombol
         await bot.send_message(chat_id, text, reply_markup=InlineKeyboardMarkup([r[:1] for r in rows]),
                                disable_notification=silent_if_empty)
-    while len(recs) > 50:
-        recs.pop(next(iter(recs)))
 
 
 async def daily_check(context: ContextTypes.DEFAULT_TYPE):
@@ -478,6 +504,48 @@ async def send_followup_reminders(context, uid: int, chat_id: int):
         reply_markup=kb(*rows), disable_notification=True)
 
 
+def apps_by_account(apps: list[dict]) -> dict:
+    """Kelompokkan lamaran per akun Gmail pengirimnya; balasan HR dicari di inbox akun itu."""
+    by_account = {}
+    for a in apps:
+        account = gmail_accounts.get(a.get("dari"))
+        if account:
+            by_account.setdefault(account, []).append(a)
+        else:
+            log.warning("akun pengirim lamaran #%s (%s) tidak ada di .env", a["id"], a.get("dari"))
+    return by_account
+
+
+def record_reply(uid: int, app_id: int, reply: dict, info: dict):
+    """Simpan balasan & naikkan status. Mengembalikan (lamaran, status berubah?) atau None kalau tidak terkait."""
+    def apply(d):
+        d["reply_seen"] = ((d.get("reply_seen") or []) + [reply["id"]])[-1000:]
+        a = tracker.find(d, app_id)
+        if a is None or info.get("jenis") == "tidak_terkait":
+            return None
+        a.setdefault("balasan", []).append({
+            "id": reply["id"], "tanggal": tracker.now(TIMEZONE).isoformat(timespec="minutes"),
+            "jenis": info.get("jenis"), "ringkasan": info.get("ringkasan"), "subjek": reply["subject"],
+        })
+        changed = tracker.apply_reply_status(a, info.get("jenis"), TIMEZONE)
+        return dict(a), changed
+
+    return update_user(uid, apply)
+
+
+def reply_message(app: dict, reply: dict, info: dict, changed: bool) -> str:
+    text = (f"📬 Ada balasan untuk lamaran #{app['id']}\n{app.get('posisi')} - {app.get('perusahaan')}\n\n"
+            f"Dari: {reply['from']}\nSubjek: {reply['subject']}\n"
+            f"Jenis: {JENIS_LABEL.get(info.get('jenis'), info.get('jenis'))}\n\n{info.get('ringkasan') or ''}")
+    if info.get("jadwal"):
+        text += f"\n\n📅 Jadwal/tenggat: {info['jadwal']}"
+    if info.get("perlu_tindakan"):
+        text += f"\n👉 Perlu dilakukan: {info['perlu_tindakan']}"
+    if changed:
+        text += f"\n\nStatus otomatis diubah ke {tracker.STATUS[app['status']]} (bisa diganti lewat /lamaran)."
+    return text
+
+
 async def check_replies(context, uid: int, chat_id: int, manual: bool = False):
     bot = context.bot
 
@@ -498,18 +566,12 @@ async def check_replies(context, uid: int, chat_id: int, manual: bool = False):
 
     progress = await bot.send_message(chat_id, "⏳ Mengecek balasan HR di Gmail...") if manual else None
     sent_dates = {a["id"]: tracker.sent_at(a, TIMEZONE) for a in apps}
-    by_account = {}
-    for a in apps:
-        account = gmail_accounts.get(a.get("dari"))
-        if account:
-            by_account.setdefault(account, []).append(a)
-        else:
-            log.warning("akun pengirim lamaran #%s (%s) tidak ada di .env", a["id"], a.get("dari"))
+    seen = set(data.get("reply_seen") or [])
+    by_account = apps_by_account(apps)
     replies, failed = [], 0
     for account, account_apps in by_account.items():
         try:
-            replies += await asyncio.to_thread(
-                gmail_replies.find_replies, account, account_apps, set(data.get("reply_seen") or []), sent_dates)
+            replies += await asyncio.to_thread(gmail_replies.find_replies, account, account_apps, seen, sent_dates)
         except Exception as e:
             log.exception("gagal membaca balasan Gmail %s", account.address)
             await say(f"Gagal membaca Gmail {account.address}: {e}")
@@ -524,34 +586,13 @@ async def check_replies(context, uid: int, chat_id: int, manual: bool = False):
         except Exception:
             log.exception("gagal mengklasifikasi balasan")
             continue  # tidak ditandai 'seen' supaya dicoba lagi
-
-        def apply(d, reply=reply, info=info, app_id=app["id"]):
-            d["reply_seen"] = ((d.get("reply_seen") or []) + [reply["id"]])[-1000:]
-            a = tracker.find(d, app_id)
-            if a is None or info.get("jenis") == "tidak_terkait":
-                return None
-            a.setdefault("balasan", []).append({
-                "id": reply["id"], "tanggal": tracker.now(TIMEZONE).isoformat(timespec="minutes"),
-                "jenis": info.get("jenis"), "ringkasan": info.get("ringkasan"), "subjek": reply["subject"],
-            })
-            changed = tracker.apply_reply_status(a, info.get("jenis"), TIMEZONE)
-            return dict(a), changed
-
-        result = update_user(uid, apply)
+        result = record_reply(uid, app["id"], reply, info)
         if not result:
             continue
         found += 1
         a, changed = result
-        text = (f"📬 Ada balasan untuk lamaran #{a['id']}\n{a.get('posisi')} - {a.get('perusahaan')}\n\n"
-                f"Dari: {reply['from']}\nSubjek: {reply['subject']}\n"
-                f"Jenis: {JENIS_LABEL.get(info.get('jenis'), info.get('jenis'))}\n\n{info.get('ringkasan') or ''}")
-        if info.get("jadwal"):
-            text += f"\n\n📅 Jadwal/tenggat: {info['jadwal']}"
-        if info.get("perlu_tindakan"):
-            text += f"\n👉 Perlu dilakukan: {info['perlu_tindakan']}"
-        if changed:
-            text += f"\n\nStatus otomatis diubah ke {tracker.STATUS[a['status']]} (bisa diganti lewat /lamaran)."
-        await bot.send_message(chat_id, text, reply_markup=kb([("📋 Lihat detail lamaran", f"app:{a['id']}")]),
+        await bot.send_message(chat_id, reply_message(a, reply, info, changed),
+                               reply_markup=kb([("📋 Lihat detail lamaran", f"app:{a['id']}")]),
                                disable_notification=info.get("jenis") not in LOUD_REPLIES)
 
     if manual and not found and failed < len(by_account):
@@ -811,257 +852,284 @@ async def show_send_confirmation(message, context, uid: int):
 
 
 # ================================================================ tombol
+# Setiap tombol punya callback_data "<nama>" atau "<nama>:<argumen>". Satu fungsi per tombol,
+# dipetakan di BUTTONS. Semua fungsi menerima (query, context, uid, data, arg).
+async def btn_skip(query, context, uid, data, arg):
+    await query.edit_message_reply_markup(None)
+    await query.message.reply_text("Oke, dilewati. Kirim lowongan berikutnya kapan saja.")
+
+
+async def btn_gaya(query, context, uid, data, style):
+    update_user(uid, lambda d: d.__setitem__("gaya", style))
+    markup = kb([("🔄 Buat ulang cover letter", "cl")]) if context.user_data.get("job") else None
+    await safe_edit(query.message, f"✅ Gaya cover letter diubah ke {GAYA_LABEL.get(style)}.", markup)
+
+
+async def btn_settings(query, context, uid, data, arg):
+    """set:gaya, set:akun, set:akun:<i>, set:tog:<key>, set:back"""
+    parts = arg.split(":")
+    if parts[0] == "gaya":
+        text, markup = gaya_view(data)
+        await safe_edit(query.message, text, markup)
+        return
+    if parts[0] == "akun" and len(parts) == 1:
+        default = default_account(data)
+        rows = [[(f"{'⭐ ' if a == default else ''}{a.address}", f"set:akun:{i}")]
+                for i, a in enumerate(gmail_accounts.load())]
+        await safe_edit(query.message, "Pilih akun Gmail default untuk mengirim lamaran:",
+                        kb(*rows, [("⬅️ Kembali", "set:back")]))
+        return
+    if parts[0] == "akun":
+        accounts = gmail_accounts.load()
+        idx = int(parts[1])
+        if idx < len(accounts):
+            update_user(uid, lambda d: d.__setitem__("gmail_default", accounts[idx].address))
+    elif parts[0] == "tog" and parts[1] in TOGGLES:
+        update_user(uid, lambda d: d.__setitem__(parts[1], not d.get(parts[1], True)))
+    text, markup = settings_view(load_user(uid))
+    await safe_edit(query.message, text, markup)
+
+
+async def btn_lamaran_list(query, context, uid, data, arg):
+    text, markup = lamaran_list_view(data)
+    await safe_edit(query.message, text, markup)
+
+
+async def btn_app_detail(query, context, uid, data, app_id):
+    app = tracker.find(data, int(app_id))
+    if not app:
+        await query.message.reply_text("Lamaran tidak ditemukan.")
+        return
+    text, markup = app_detail_view(app)
+    await query.message.reply_text(text, reply_markup=markup)
+
+
+async def btn_status(query, context, uid, data, arg, new_message: bool = False):
+    """st:<id>:<status>. new_message dipakai dari pesan berisi banyak lamaran supaya daftarnya tidak tertimpa."""
+    app_id, status = arg.split(":", 1)
+
+    def change(d):
+        a = tracker.find(d, int(app_id))
+        if a:
+            tracker.set_status(a, status, TIMEZONE)
+        return dict(a) if a else None
+
+    app = update_user(uid, change)
+    if not app:
+        return
+    text, markup = app_detail_view(app)
+    if new_message:
+        await query.message.reply_text(text, reply_markup=markup)
+    else:
+        await safe_edit(query.message, text, markup)
+
+
+async def btn_followup_draft(query, context, uid, data, app_id):
+    app = tracker.find(data, int(app_id))
+    if not app or not app.get("ke"):
+        await query.message.reply_text("Lamaran atau alamat email tujuannya tidak ditemukan.")
+        return
+    if not data.get("profile"):
+        await query.message.reply_text("Profil CV tidak ditemukan. Kirim ulang CV kamu dulu.")
+        return
+    msg = await query.message.reply_text("⏳ Menulis email follow-up...")
+    try:
+        text = await asyncio.to_thread(
+            ai_helper.write_followup, data["profile"], app, tracker.days_since(app, TIMEZONE))
+    except Exception as e:
+        log.exception("follow-up gagal")
+        await msg.edit_text(f"Gagal membuat follow-up: {e}")
+        return
+    followup = {"app_id": app["id"], "text": text}
+    context.user_data.update({"followup": followup, "draft_kind": "fu"})
+    await msg.edit_text(**followup_view(data, followup))
+
+
+async def btn_followup_send(query, context, uid, data, arg):
+    followup = context.user_data.get("followup")
+    app = tracker.find(data, followup["app_id"]) if followup else None
+    if not app:
+        await query.message.reply_text("Draft follow-up sudah tidak ada. Buat ulang lewat /lamaran.")
+        return
+    account = gmail_accounts.get(app.get("dari"))
+    if not account:
+        await query.message.reply_text(
+            f"Akun Gmail pengirim lamaran ini ({app.get('dari')}) tidak ada di .env." if app.get("dari")
+            else GMAIL_MISSING)
+        return
+    await query.edit_message_reply_markup(None)
+    msg = await query.message.reply_text(f"⏳ Mengirim follow-up dari {account.address}...")
+    subject = app.get("subjek") or email_subject(app, (data.get("profile") or {}).get("nama") or "")
+    try:
+        await asyncio.to_thread(mailer.send_application, account, app["ke"], f"Re: {subject}",
+                                followup["text"], None, app.get("message_id"))
+    except Exception as e:
+        log.exception("kirim follow-up gagal")
+        await msg.edit_text(f"Gagal mengirim follow-up: {e}")
+        return
+
+    def record(d):
+        a = tracker.find(d, app["id"])
+        if a:
+            a.setdefault("followups", []).append(tracker.now(TIMEZONE).isoformat(timespec="minutes"))
+            a["reminder_sent"] = True
+
+    update_user(uid, record)
+    context.user_data.update({"followup": None, "draft_kind": None})
+    await msg.edit_text(f"✅ Follow-up terkirim ke {app['ke']}.")
+
+
+async def btn_followup_cancel(query, context, uid, data, arg):
+    context.user_data.update({"followup": None, "draft_kind": None})
+    await query.edit_message_reply_markup(None)
+    await query.message.reply_text("Follow-up dibatalkan.")
+
+
+async def btn_recommendation(query, context, uid, data, rid):
+    rec = (context.user_data.get("recs") or {}).get(rid)
+    if not rec:
+        await query.message.reply_text("Rekomendasi ini sudah kedaluwarsa. Ketik /rekomendasi lagi.")
+        return
+    msg = await query.message.reply_text(f"⏳ Membuka lowongan {rec.get('posisi')}...")
+    job_text = None
+    if rec.get("link"):
+        try:
+            fetched = await asyncio.to_thread(job_fetcher.fetch_job_text, rec["link"])
+            if len(fetched) >= 300:
+                job_text = fetched
+        except Exception:
+            log.info("gagal membuka link rekomendasi", exc_info=True)
+    if not job_text:
+        await msg.edit_text("Halaman lowongannya tidak bisa dibaca bot (biasanya diblokir situsnya). "
+                            "Buka lewat tombol 🌐 Buka, lalu copy-paste deskripsi lowongannya ke sini ya.")
+        return
+    await msg.delete()
+    await process_job(query.message, context, uid, job_text)
+
+
+# ---- tombol di bawah ini butuh lowongan yang sedang diproses (context.user_data["job"])
+async def btn_tailor(query, context, uid, data, arg):
+    await query.edit_message_reply_markup(None)
+    await tailor_flow(query.message, context, uid)
+
+
+async def btn_original_cv(query, context, uid, data, arg):
+    context.user_data.update({"active_profile": data.get("profile"), "tailored_cv": None})
+    await query.edit_message_reply_markup(None)
+    await query.message.reply_text("Oke, pakai CV asli.", reply_markup=kb([("✍️ Buat Cover Letter", "cl")]))
+
+
+async def btn_cover_letter(query, context, uid, data, arg):
+    profile = context.user_data.get("active_profile") or data.get("profile")
+    style = data.get("gaya", "formal")
+    msg = await query.message.reply_text(f"⏳ Menulis cover letter ({GAYA_LABEL.get(style)})...")
+    try:
+        cl = await asyncio.to_thread(
+            ai_helper.write_cover_letter, profile, context.user_data["job"], context.user_data["job_text"], style)
+    except Exception as e:
+        log.exception("cover letter gagal")
+        await msg.edit_text(f"Gagal membuat cover letter: {e}")
+        return
+    context.user_data["cover_letter"] = cl
+    context.user_data["draft_kind"] = "cl"
+    await msg.edit_text(cl, reply_markup=cover_letter_buttons())
+    await query.message.reply_text("Mau diubah? Pakai /revisi <instruksi>, atau /gaya untuk ganti gaya.")
+
+
+async def btn_send(query, context, uid, data, arg):
+    if not context.user_data.get("cover_letter"):
+        await query.message.reply_text("Buat cover letter dulu.")
+        return
+    if not gmail_configured():
+        await query.message.reply_text(GMAIL_MISSING)
+        return
+    job = context.user_data["job"]
+    if job.get("email_hr"):
+        context.user_data["recipient"] = job["email_hr"]
+        await show_send_confirmation(query.message, context, uid)
+    else:
+        context.user_data["awaiting_email"] = True
+        await query.message.reply_text("Email HR tidak ditemukan di lowongan. Ketik alamat email tujuannya:")
+
+
+async def btn_confirm_send(query, context, uid, data, arg):
+    """confirm:<indeks akun Gmail>"""
+    recipient = context.user_data.get("recipient")
+    if not recipient:
+        await query.message.reply_text("Alamat tujuan belum ada.")
+        return
+    accounts = gmail_accounts.load()
+    idx = int(arg or 0)
+    if idx >= len(accounts):
+        await query.message.reply_text("Akun Gmail tidak ditemukan. Cek .env lalu coba kirim lagi.")
+        return
+    account = accounts[idx]
+    job = context.user_data["job"]
+    await query.edit_message_reply_markup(None)
+    msg = await query.message.reply_text(f"⏳ Mengirim email dari {account.address}...")
+    subject = email_subject(job, (data.get("profile") or {}).get("nama") or "")
+    try:
+        message_id = await asyncio.to_thread(
+            mailer.send_application, account, recipient, subject,
+            context.user_data["cover_letter"], attachment_path(context, uid))
+    except Exception as e:
+        log.exception("kirim email gagal")
+        await msg.edit_text(f"Gagal mengirim: {e}\nCek alamat dan app password {account.address} di .env")
+        return
+    info = {
+        "posisi": job.get("posisi"), "perusahaan": job.get("perusahaan"), "ke": recipient,
+        "dari": account.address,
+        "skor": job.get("skor"), "bahasa": job.get("bahasa_lowongan"),
+        "cv_disesuaikan": bool(context.user_data.get("tailored_cv")), "subjek": subject,
+        "message_id": message_id, "gaya": data.get("gaya", "formal"),
+        "job_text": (context.user_data.get("job_text") or "")[:4000],
+    }
+    app = update_user(uid, lambda d: tracker.add_application(d, info, TIMEZONE))
+    context.user_data["cover_letter"] = None
+    await msg.edit_text(
+        f"✅ Lamaran #{app['id']} terkirim ke {recipient} dari {account.address}. Semoga lolos! 🍀\n\n"
+        f"Balasan HR akan dicek otomatis, dan kalau {FOLLOWUP_DAYS} hari belum ada kabar "
+        f"aku ingatkan untuk follow-up. Lihat semua lamaran di /lamaran.")
+
+
+async def btn_edit_recipient(query, context, uid, data, arg):
+    context.user_data["awaiting_email"] = True
+    await query.edit_message_reply_markup(None)
+    await query.message.reply_text("Ketik alamat email tujuan yang benar:")
+
+
+async def btn_cancel_send(query, context, uid, data, arg):
+    context.user_data["recipient"] = None
+    await query.edit_message_reply_markup(None)
+    await query.message.reply_text("Dibatalkan. Tidak ada email yang dikirim.")
+
+
+BUTTONS = {
+    "skip": btn_skip, "gaya": btn_gaya, "set": btn_settings, "lamlist": btn_lamaran_list,
+    "app": btn_app_detail, "st": btn_status,
+    "str": lambda *a: btn_status(*a, new_message=True),
+    "fu": btn_followup_draft, "fusend": btn_followup_send, "fucancel": btn_followup_cancel,
+    "rec": btn_recommendation,
+    "tailor": btn_tailor, "orig": btn_original_cv, "cl": btn_cover_letter, "send": btn_send,
+    "confirm": btn_confirm_send, "editto": btn_edit_recipient, "cancel": btn_cancel_send,
+}
+NEEDS_JOB = {"tailor", "orig", "cl", "send", "confirm", "editto", "cancel"}
+
+
 @only_allowed
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    action = query.data
-    uid = update.effective_user.id
-    data = load_user(uid)
-
-    if action == "skip":
-        await query.edit_message_reply_markup(None)
-        await query.message.reply_text("Oke, dilewati. Kirim lowongan berikutnya kapan saja.")
+    name, _, arg = query.data.partition(":")
+    handler = BUTTONS.get(name)
+    if handler is None:
+        log.warning("tombol tidak dikenal: %s", query.data)
         return
-
-    if action.startswith("gaya:"):
-        style = action.split(":", 1)[1]
-        update_user(uid, lambda d: d.__setitem__("gaya", style))
-        markup = kb([("🔄 Buat ulang cover letter", "cl")]) if context.user_data.get("job") else None
-        await safe_edit(query.message, f"✅ Gaya cover letter diubah ke {GAYA_LABEL.get(style)}.", markup)
-        return
-
-    if action.startswith("set:"):
-        parts = action.split(":")
-        if parts[1] == "gaya":
-            text, markup = gaya_view(data)
-            await safe_edit(query.message, text, markup)
-            return
-        if parts[1] == "akun" and len(parts) == 2:
-            default = default_account(data)
-            rows = [[(f"{'⭐ ' if a == default else ''}{a.address}", f"set:akun:{i}")]
-                    for i, a in enumerate(gmail_accounts.load())]
-            await safe_edit(query.message, "Pilih akun Gmail default untuk mengirim lamaran:",
-                            kb(*rows, [("⬅️ Kembali", "set:back")]))
-            return
-        if parts[1] == "akun":
-            accounts = gmail_accounts.load()
-            idx = int(parts[2])
-            if idx < len(accounts):
-                update_user(uid, lambda d: d.__setitem__("gmail_default", accounts[idx].address))
-        elif parts[1] == "tog" and parts[2] in TOGGLES:
-            update_user(uid, lambda d: d.__setitem__(parts[2], not d.get(parts[2], True)))
-        text, markup = settings_view(load_user(uid))
-        await safe_edit(query.message, text, markup)
-        return
-
-    if action == "lamlist":
-        text, markup = lamaran_list_view(data)
-        await safe_edit(query.message, text, markup)
-        return
-
-    if action.startswith("app:"):
-        app = tracker.find(data, int(action.split(":")[1]))
-        if not app:
-            await query.message.reply_text("Lamaran tidak ditemukan.")
-            return
-        text, markup = app_detail_view(app)
-        await query.message.reply_text(text, reply_markup=markup)
-        return
-
-    if action.startswith(("st:", "str:")):
-        # "str:" dipakai dari pesan berisi banyak lamaran: hasilnya dikirim sebagai pesan baru
-        prefix, app_id, status = action.split(":", 2)
-
-        def change(d):
-            a = tracker.find(d, int(app_id))
-            if a:
-                tracker.set_status(a, status, TIMEZONE)
-            return dict(a) if a else None
-
-        app = update_user(uid, change)
-        if app:
-            text, markup = app_detail_view(app)
-            if prefix == "str":
-                await query.message.reply_text(text, reply_markup=markup)
-            else:
-                await safe_edit(query.message, text, markup)
-        return
-
-    if action.startswith("fu:"):
-        app = tracker.find(data, int(action.split(":")[1]))
-        if not app or not app.get("ke"):
-            await query.message.reply_text("Lamaran atau alamat email tujuannya tidak ditemukan.")
-            return
-        if not data.get("profile"):
-            await query.message.reply_text("Profil CV tidak ditemukan. Kirim ulang CV kamu dulu.")
-            return
-        msg = await query.message.reply_text("⏳ Menulis email follow-up...")
-        try:
-            text = await asyncio.to_thread(
-                ai_helper.write_followup, data["profile"], app, tracker.days_since(app, TIMEZONE))
-        except Exception as e:
-            log.exception("follow-up gagal")
-            await msg.edit_text(f"Gagal membuat follow-up: {e}")
-            return
-        followup = {"app_id": app["id"], "text": text}
-        context.user_data.update({"followup": followup, "draft_kind": "fu"})
-        await msg.edit_text(**followup_view(data, followup))
-        return
-
-    if action == "fusend":
-        followup = context.user_data.get("followup")
-        app = tracker.find(data, followup["app_id"]) if followup else None
-        if not app:
-            await query.message.reply_text("Draft follow-up sudah tidak ada. Buat ulang lewat /lamaran.")
-            return
-        account = gmail_accounts.get(app.get("dari"))
-        if not account:
-            await query.message.reply_text(
-                f"Akun Gmail pengirim lamaran ini ({app.get('dari')}) tidak ada di .env." if app.get("dari")
-                else GMAIL_MISSING)
-            return
-        await query.edit_message_reply_markup(None)
-        msg = await query.message.reply_text(f"⏳ Mengirim follow-up dari {account.address}...")
-        subject = app.get("subjek") or email_subject(app, (data.get("profile") or {}).get("nama") or "")
-        try:
-            await asyncio.to_thread(mailer.send_application, account, app["ke"], f"Re: {subject}",
-                                    followup["text"], None, app.get("message_id"))
-        except Exception as e:
-            log.exception("kirim follow-up gagal")
-            await msg.edit_text(f"Gagal mengirim follow-up: {e}")
-            return
-
-        def record(d):
-            a = tracker.find(d, app["id"])
-            if a:
-                a.setdefault("followups", []).append(tracker.now(TIMEZONE).isoformat(timespec="minutes"))
-                a["reminder_sent"] = True
-
-        update_user(uid, record)
-        context.user_data.update({"followup": None, "draft_kind": None})
-        await msg.edit_text(f"✅ Follow-up terkirim ke {app['ke']}.")
-        return
-
-    if action == "fucancel":
-        context.user_data.update({"followup": None, "draft_kind": None})
-        await query.edit_message_reply_markup(None)
-        await query.message.reply_text("Follow-up dibatalkan.")
-        return
-
-    if action.startswith("rec:"):
-        rec = (context.user_data.get("recs") or {}).get(action[4:])
-        if not rec:
-            await query.message.reply_text("Rekomendasi ini sudah kedaluwarsa. Ketik /rekomendasi lagi.")
-            return
-        msg = await query.message.reply_text(f"⏳ Membuka lowongan {rec.get('posisi')}...")
-        job_text = None
-        if rec.get("link"):
-            try:
-                fetched = await asyncio.to_thread(job_fetcher.fetch_job_text, rec["link"])
-                if len(fetched) >= 300:
-                    job_text = fetched
-            except Exception:
-                log.info("gagal membuka link rekomendasi", exc_info=True)
-        if not job_text:
-            await msg.edit_text("Halaman lowongannya tidak bisa dibaca bot (biasanya diblokir situsnya). "
-                                "Buka lewat tombol 🌐 Buka, lalu copy-paste deskripsi lowongannya ke sini ya.")
-            return
-        await msg.delete()
-        await process_job(query.message, context, uid, job_text)
-        return
-
-    job = context.user_data.get("job")
-    if not job:
+    if name in NEEDS_JOB and not context.user_data.get("job"):
         await query.message.reply_text("Sesi lowongan sudah habis. Kirim ulang lowongannya ya.")
         return
-
-    if action == "tailor":
-        await query.edit_message_reply_markup(None)
-        await tailor_flow(query.message, context, uid)
-
-    elif action == "orig":
-        context.user_data.update({"active_profile": data.get("profile"), "tailored_cv": None})
-        await query.edit_message_reply_markup(None)
-        await query.message.reply_text("Oke, pakai CV asli.", reply_markup=kb([("✍️ Buat Cover Letter", "cl")]))
-
-    elif action == "cl":
-        profile = context.user_data.get("active_profile") or data.get("profile")
-        style = data.get("gaya", "formal")
-        msg = await query.message.reply_text(f"⏳ Menulis cover letter ({GAYA_LABEL.get(style)})...")
-        try:
-            cl = await asyncio.to_thread(
-                ai_helper.write_cover_letter, profile, job, context.user_data["job_text"], style)
-        except Exception as e:
-            log.exception("cover letter gagal")
-            await msg.edit_text(f"Gagal membuat cover letter: {e}")
-            return
-        context.user_data["cover_letter"] = cl
-        context.user_data["draft_kind"] = "cl"
-        await msg.edit_text(cl, reply_markup=cover_letter_buttons())
-        await query.message.reply_text("Mau diubah? Pakai /revisi <instruksi>, atau /gaya untuk ganti gaya.")
-
-    elif action == "send":
-        if not context.user_data.get("cover_letter"):
-            await query.message.reply_text("Buat cover letter dulu.")
-            return
-        if not gmail_configured():
-            await query.message.reply_text(GMAIL_MISSING)
-            return
-        if job.get("email_hr"):
-            context.user_data["recipient"] = job["email_hr"]
-            await show_send_confirmation(query.message, context, uid)
-        else:
-            context.user_data["awaiting_email"] = True
-            await query.message.reply_text("Email HR tidak ditemukan di lowongan. Ketik alamat email tujuannya:")
-
-    elif action == "confirm" or action.startswith("confirm:"):
-        recipient = context.user_data.get("recipient")
-        if not recipient:
-            await query.message.reply_text("Alamat tujuan belum ada.")
-            return
-        accounts = gmail_accounts.load()
-        idx = int(action.split(":")[1]) if ":" in action else 0
-        if idx >= len(accounts):
-            await query.message.reply_text("Akun Gmail tidak ditemukan. Cek .env lalu coba kirim lagi.")
-            return
-        account = accounts[idx]
-        await query.edit_message_reply_markup(None)
-        msg = await query.message.reply_text(f"⏳ Mengirim email dari {account.address}...")
-        name = (data.get("profile") or {}).get("nama") or ""
-        subject = email_subject(job, name)
-        try:
-            message_id = await asyncio.to_thread(
-                mailer.send_application, account, recipient, subject,
-                context.user_data["cover_letter"], attachment_path(context, uid))
-        except Exception as e:
-            log.exception("kirim email gagal")
-            await msg.edit_text(f"Gagal mengirim: {e}\nCek alamat dan app password {account.address} di .env")
-            return
-        info = {
-            "posisi": job.get("posisi"), "perusahaan": job.get("perusahaan"), "ke": recipient,
-            "dari": account.address,
-            "skor": job.get("skor"), "bahasa": job.get("bahasa_lowongan"),
-            "cv_disesuaikan": bool(context.user_data.get("tailored_cv")), "subjek": subject,
-            "message_id": message_id, "gaya": data.get("gaya", "formal"),
-            "job_text": (context.user_data.get("job_text") or "")[:4000],
-        }
-        app = update_user(uid, lambda d: tracker.add_application(d, info, TIMEZONE))
-        context.user_data["cover_letter"] = None
-        await msg.edit_text(
-            f"✅ Lamaran #{app['id']} terkirim ke {recipient} dari {account.address}. Semoga lolos! 🍀\n\n"
-            f"Balasan HR akan dicek otomatis, dan kalau {FOLLOWUP_DAYS} hari belum ada kabar "
-            f"aku ingatkan untuk follow-up. Lihat semua lamaran di /lamaran.")
-
-    elif action == "editto":
-        context.user_data["awaiting_email"] = True
-        await query.edit_message_reply_markup(None)
-        await query.message.reply_text("Ketik alamat email tujuan yang benar:")
-
-    elif action == "cancel":
-        context.user_data["recipient"] = None
-        await query.edit_message_reply_markup(None)
-        await query.message.reply_text("Dibatalkan. Tidak ada email yang dikirim.")
+    uid = update.effective_user.id
+    await handler(query, context, uid, load_user(uid), arg)
 
 
 # ================================================================ main

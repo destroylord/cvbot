@@ -96,7 +96,22 @@ dan restart sendiri 10 detik setelah crash. Langkah lengkapnya ada di
   tawaran kerja, dan HR meminta info (karena perlu kamu tindak lanjuti).
   Daftarnya diatur di `LOUD_REPLIES` di `bot.py`.
 
-### 6. Lain-lain
+### 6. Refactor struktur kode (tanpa perubahan perilaku)
+
+Mengikuti prinsip *python-design-patterns* (satu tanggung jawab per fungsi, pisahkan I/O dari logika, KISS):
+
+- `handle_button` (250 baris, rantai `if` untuk ~20 tombol) dipecah menjadi satu fungsi `btn_*` per
+  tombol, dipetakan lewat dictionary `BUTTONS`. Tombol yang butuh lowongan aktif didaftarkan di
+  `NEEDS_JOB`. Menambah tombol baru cukup: buat fungsi `btn_*`, daftarkan di `BUTTONS`.
+- `send_recommendations` (95 baris) dipisah menjadi: baca Gmail (`fetch_new_alert_emails`),
+  AI (`jobs_from_emails`), logika murni (`dedupe_jobs`, `top_jobs`, `rec_id`), dan format pesan
+  (`recommendations_message`).
+- `check_replies` (80 baris) dipisah menjadi: `apps_by_account`, simpan data (`record_reply`),
+  dan format pesan (`reply_message`).
+- Diverifikasi dengan tes golden master: 45 skenario (semua tombol, rekomendasi, pengingat, cek
+  balasan) dijalankan dengan Telegram/Gmail/AI palsu. Output sebelum dan sesudah refactor identik.
+
+### 7. Lain-lain
 
 - `.gitignore`: `.env` (password & token) dan `data/` (CV & data lamaran) tidak ikut ter-commit.
 - `.gitattributes`: `*.sh` selalu LF supaya bisa jalan di Linux walau di-commit dari Windows.
