@@ -7,7 +7,9 @@ import json
 import logging
 import os
 import re
+import sys
 from functools import wraps
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -15,7 +17,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update  # noqa: E402
+from telegram import (  # noqa: E402
+    BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update,
+)
 from telegram.error import BadRequest  # noqa: E402
 from telegram.ext import (  # noqa: E402
     Application, CallbackQueryHandler, CommandHandler, ContextTypes,
@@ -25,18 +29,23 @@ from telegram.ext import (  # noqa: E402
 import ai_helper  # noqa: E402
 import cv_builder  # noqa: E402
 import cv_parser  # noqa: E402
+import gmail_accounts  # noqa: E402
 import gmail_replies  # noqa: E402
 import job_alerts  # noqa: E402
 import job_fetcher  # noqa: E402
 import mailer  # noqa: E402
 import tracker  # noqa: E402
 
-logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-log = logging.getLogger("cvbot")
-
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
+
+# Log ke file juga, karena saat jalan di background (pythonw) tidak ada jendela console
+_log_handlers = [RotatingFileHandler(DATA_DIR / "bot.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")]
+if sys.stderr:
+    _log_handlers.append(logging.StreamHandler())
+logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO, handlers=_log_handlers)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+log = logging.getLogger("cvbot")
 ALLOWED = {int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip()}
 TAILOR_THRESHOLD = int(os.getenv("CV_TAILOR_THRESHOLD", "70"))
 MIN_REC_SCORE = int(os.getenv("MIN_REC_SCORE", "60"))
@@ -52,6 +61,20 @@ JENIS_LABEL = {
     "interview": "🎤 Undangan interview / tes", "ditolak": "❌ Penolakan", "diterima": "🎉 Tawaran kerja",
     "info": "💬 Balasan / permintaan info", "otomatis": "🤖 Konfirmasi otomatis",
 }
+
+IMAGE_EXT = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+
+COMMANDS = [
+    ("rekomendasi", "Cek lowongan dari email job alert"),
+    ("lamaran", "Daftar lamaran, ubah status, follow-up"),
+    ("cekbalasan", "Cek balasan HR di Gmail sekarang"),
+    ("statistik", "Statistik lamaran"),
+    ("profil", "Lihat hasil scan CV"),
+    ("pengaturan", "Gaya cover letter, akun Gmail, notifikasi"),
+    ("revisi", "Revisi cover letter / follow-up terakhir"),
+    ("start", "Cara pakai & tampilkan menu"),
+]
 
 EMAIL_RE = re.compile(r"^[\w.+-]+@[\w-]+(\.[\w-]+)+$")
 URL_RE = re.compile(r"https?://\S+")
@@ -112,8 +135,23 @@ def kb(*rows):
         [[InlineKeyboardButton(text, callback_data=data) for text, data in row] for row in rows])
 
 
+GMAIL_MISSING = "GMAIL_ADDRESS / GMAIL_APP_PASSWORD belum diisi di .env."
+
+
 def gmail_configured() -> bool:
-    return bool(os.getenv("GMAIL_ADDRESS") and os.getenv("GMAIL_APP_PASSWORD"))
+    return bool(gmail_accounts.load())
+
+
+def main_menu() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [["🎯 Rekomendasi", "📂 Lamaran"], ["📬 Cek Balasan", "📊 Statistik"], ["👤 Profil", "⚙️ Pengaturan"]],
+        resize_keyboard=True, is_persistent=True,
+        input_field_placeholder="Kirim link, teks, atau foto lowongan")
+
+
+def default_account(data: dict) -> gmail_accounts.Account | None:
+    accounts = gmail_accounts.load()
+    return gmail_accounts.get(data.get("gmail_default")) or (accounts[0] if accounts else None)
 
 
 def job_summary(job: dict) -> str:
@@ -133,20 +171,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Halo! Cara pakainya:\n\n"
         "1. Kirim CV kamu (PDF/DOCX)\n"
-        "2. Kirim link / teks lowongan, atau ketik /rekomendasi untuk cari dari email job alert\n"
+        "2. Kirim link / teks / foto poster lowongan (bisa di-forward dari grup lain), "
+        "atau tekan 🎯 Rekomendasi untuk cari dari email job alert\n"
         f"3. Kalau skornya di bawah {TAILOR_THRESHOLD}, CV otomatis disesuaikan (tetap jujur)\n"
         "4. Buat cover letter, review, lalu kirim via Gmail dengan satu klik\n\n"
-        "Perintah:\n"
-        "/rekomendasi - cek lowongan dari email job alert\n"
-        "/lamaran - daftar lamaran, ubah status, follow-up\n"
-        "/statistik - statistik lamaran kamu\n"
-        "/cekbalasan - cek balasan HR di Gmail sekarang\n"
-        "/gaya - atur gaya cover letter\n"
-        "/profil - lihat hasil scan CV\n"
-        "/revisi <instruksi> - revisi cover letter / follow-up terakhir\n\n"
+        "Pakai tombol menu di bawah, atau tombol Menu di samping kolom chat untuk daftar perintah. "
+        "Revisi cover letter: /revisi <instruksi>\n\n"
         f"Otomatis: rekomendasi & pengingat follow-up tiap hari jam {DAILY_CHECK_TIME}, "
-        f"cek balasan HR tiap {REPLY_CHECK_MINUTES} menit."
-    )
+        f"cek balasan HR tiap {REPLY_CHECK_MINUTES} menit (bisa dimatikan di ⚙️ Pengaturan).",
+        reply_markup=main_menu())
 
 
 @only_allowed
@@ -183,6 +216,7 @@ def app_detail_view(app: dict):
     text = (f"#{app['id']} {app.get('posisi')}\n"
             f"🏢 {app.get('perusahaan')}\n"
             f"📧 {app.get('ke')}\n"
+            + (f"📤 Dari {app['dari']}\n" if app.get("dari") else "") +
             f"📅 Dikirim {tracker.sent_at(app, TIMEZONE).strftime('%d-%m-%Y %H:%M')} ({days} hari lalu)\n"
             f"Skor: {app.get('skor')} · {'CV disesuaikan' if app.get('cv_disesuaikan') else 'CV asli'}\n"
             f"Follow-up terkirim: {len(app.get('followups') or [])}x\n\n"
@@ -210,15 +244,47 @@ async def statistik(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(tracker.stats_text(load_user(update.effective_user.id), TIMEZONE))
 
 
+def gaya_view(data: dict):
+    current = data.get("gaya", "formal")
+    return (f"Gaya cover letter sekarang: {GAYA_LABEL.get(current)}\n\n"
+            "🎩 Formal: sopan dan profesional, 250-300 kata\n"
+            "😊 Santai: profesional tapi hangat, 200-250 kata\n"
+            "⚡ Singkat: langsung ke poin, maksimal 150 kata",
+            kb([(label, f"gaya:{key}") for key, label in GAYA_LABEL.items()]))
+
+
 @only_allowed
 async def gaya(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    current = load_user(update.effective_user.id).get("gaya", "formal")
-    await update.message.reply_text(
-        f"Gaya cover letter sekarang: {GAYA_LABEL.get(current)}\n\n"
-        "🎩 Formal: sopan dan profesional, 250-300 kata\n"
-        "😊 Santai: profesional tapi hangat, 200-250 kata\n"
-        "⚡ Singkat: langsung ke poin, maksimal 150 kata",
-        reply_markup=kb([(label, f"gaya:{key}") for key, label in GAYA_LABEL.items()]))
+    text, markup = gaya_view(load_user(update.effective_user.id))
+    await update.message.reply_text(text, reply_markup=markup)
+
+
+TOGGLES = {"auto_rekomendasi": "🎯 Rekomendasi harian", "auto_balasan": "📬 Cek balasan otomatis"}
+
+
+def settings_view(data: dict):
+    accounts = gmail_accounts.load()
+    default = default_account(data)
+    onoff = {key: "Aktif" if data.get(key, True) else "Mati" for key in TOGGLES}
+    text = (f"⚙️ Pengaturan\n\n"
+            f"Gaya cover letter: {GAYA_LABEL.get(data.get('gaya', 'formal'))}\n"
+            f"Akun Gmail default: {default.address if default else 'belum diisi di .env'}"
+            f"{f' ({len(accounts)} akun terhubung)' if len(accounts) > 1 else ''}\n"
+            f"Rekomendasi harian jam {DAILY_CHECK_TIME}: {onoff['auto_rekomendasi']}\n"
+            f"Cek balasan HR tiap {REPLY_CHECK_MINUTES} menit: {onoff['auto_balasan']}\n\n"
+            f"Jam, ambang skor, dan akun Gmail diatur di file .env.")
+    rows = [[("✍️ Gaya cover letter", "set:gaya")]]
+    if len(accounts) > 1:
+        rows.append([("📧 Akun Gmail default", "set:akun")])
+    rows += [[(f"{label}: {'ON ✅' if data.get(key, True) else 'OFF ⛔'}", f"set:tog:{key}")]
+             for key, label in TOGGLES.items()]
+    return text, kb(*rows)
+
+
+@only_allowed
+async def pengaturan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text, markup = settings_view(load_user(update.effective_user.id))
+    await update.message.reply_text(text, reply_markup=markup)
 
 
 @only_allowed
@@ -274,17 +340,28 @@ async def send_recommendations(context, uid: int, chat_id: int, silent_if_empty:
         await say("Kirim CV kamu dulu sebelum minta rekomendasi.")
         return
     if not gmail_configured():
-        await say("GMAIL_ADDRESS / GMAIL_APP_PASSWORD belum diisi di .env.")
+        await say(GMAIL_MISSING)
         return
 
-    await say("⏳ Mengecek email job alert...")
+    accounts = gmail_accounts.load()
+    await say(f"⏳ Mengecek email job alert di {len(accounts)} akun Gmail..."
+              if len(accounts) > 1 else "⏳ Mengecek email job alert...")
     seen = list(data.get("gmail_seen") or [])
-    try:
-        emails = await asyncio.to_thread(job_alerts.fetch_alert_emails, set(seen), LOOKBACK_DAYS)
-    except Exception as e:
-        log.exception("gagal membaca Gmail")
-        await say(f"Gagal membaca Gmail: {e}")
-        return
+    emails, failed = [], []
+    for account in accounts:
+        try:
+            found = await asyncio.to_thread(job_alerts.fetch_alert_emails, set(seen), LOOKBACK_DAYS, account)
+        except Exception as e:
+            log.exception("gagal membaca Gmail %s", account.address)
+            failed.append(f"{account.address}: {e}")
+            continue
+        # Job alert yang sama bisa masuk ke beberapa akun
+        known = {em["id"] for em in emails}
+        emails += [em for em in found if em["id"] not in known]
+    if failed:
+        await say("Gagal membaca Gmail:\n" + "\n".join(failed))
+        if len(failed) == len(accounts):
+            return
 
     jobs = []
     for em in emails:
@@ -340,7 +417,8 @@ async def send_recommendations(context, uid: int, chat_id: int, silent_if_empty:
 async def daily_check(context: ContextTypes.DEFAULT_TYPE):
     uid, chat_id = context.job.user_id, context.job.chat_id
     try:
-        await send_recommendations(context, uid, chat_id, silent_if_empty=True)
+        if load_user(uid).get("auto_rekomendasi", True):
+            await send_recommendations(context, uid, chat_id, silent_if_empty=True)
     except Exception:
         log.exception("cek rekomendasi harian gagal")
     try:
@@ -351,7 +429,8 @@ async def daily_check(context: ContextTypes.DEFAULT_TYPE):
 
 async def reply_check_job(context: ContextTypes.DEFAULT_TYPE):
     try:
-        await check_replies(context, context.job.user_id, context.job.chat_id)
+        if load_user(context.job.user_id).get("auto_balasan", True):
+            await check_replies(context, context.job.user_id, context.job.chat_id)
     except Exception:
         log.exception("cek balasan HR gagal")
 
@@ -376,7 +455,7 @@ async def check_replies(context, uid: int, chat_id: int, manual: bool = False):
             await bot.send_message(chat_id, text)
 
     if not gmail_configured():
-        await say("GMAIL_ADDRESS / GMAIL_APP_PASSWORD belum diisi di .env.")
+        await say(GMAIL_MISSING)
         return
     data = load_user(uid)
     apps = [a for a in data.get("lamaran") or []
@@ -388,13 +467,22 @@ async def check_replies(context, uid: int, chat_id: int, manual: bool = False):
 
     await say("⏳ Mengecek balasan HR di Gmail...")
     sent_dates = {a["id"]: tracker.sent_at(a, TIMEZONE) for a in apps}
-    try:
-        replies = await asyncio.to_thread(
-            gmail_replies.find_replies, apps, set(data.get("reply_seen") or []), sent_dates)
-    except Exception as e:
-        log.exception("gagal membaca balasan Gmail")
-        await say(f"Gagal membaca Gmail: {e}")
-        return
+    by_account = {}
+    for a in apps:
+        account = gmail_accounts.get(a.get("dari"))
+        if account:
+            by_account.setdefault(account, []).append(a)
+        else:
+            log.warning("akun pengirim lamaran #%s (%s) tidak ada di .env", a["id"], a.get("dari"))
+    replies, failed = [], 0
+    for account, account_apps in by_account.items():
+        try:
+            replies += await asyncio.to_thread(
+                gmail_replies.find_replies, account, account_apps, set(data.get("reply_seen") or []), sent_dates)
+        except Exception as e:
+            log.exception("gagal membaca balasan Gmail %s", account.address)
+            await say(f"Gagal membaca Gmail {account.address}: {e}")
+            failed += 1
 
     found = 0
     for reply in replies:
@@ -434,7 +522,7 @@ async def check_replies(context, uid: int, chat_id: int, manual: bool = False):
             text += f"\n\nStatus otomatis diubah ke {tracker.STATUS[a['status']]} (bisa diganti lewat /lamaran)."
         await bot.send_message(chat_id, text, reply_markup=kb([("📋 Lihat detail lamaran", f"app:{a['id']}")]))
 
-    if manual and not found:
+    if manual and not found and failed < len(by_account):
         await bot.send_message(chat_id, "Belum ada balasan baru dari HR.")
 
 
@@ -527,13 +615,47 @@ async def tailor_flow(message, context, uid: int):
                             [("↩️ Pakai CV Asli", "orig"), ("❌ Lewati", "skip")]))
 
 
+# ================================================================ gambar lowongan
+async def process_job_image(message, context, uid: int, tg_file, mime: str):
+    if not load_user(uid).get("profile"):
+        await message.reply_text("Kirim CV kamu dulu (PDF/DOCX), baru kirim gambar lowongannya.")
+        return
+    msg = await message.reply_text("⏳ Membaca gambar lowongan...")
+    try:
+        file = await tg_file.get_file()
+        image = bytes(await file.download_as_bytearray())
+        job_text = await asyncio.to_thread(ai_helper.read_job_image, image, mime, message.caption or "")
+    except Exception as e:
+        log.exception("gagal membaca gambar lowongan")
+        await msg.edit_text(f"Gagal membaca gambar: {e}\nCoba kirim teks lowongannya saja.")
+        return
+    if "BUKAN_LOWONGAN" in job_text[:100] or len(job_text.strip()) < 50:
+        await msg.edit_text("Gambar ini sepertinya bukan lowongan kerja, atau tulisannya tidak terbaca. "
+                            "Coba kirim gambar yang lebih jelas atau paste teks lowongannya.")
+        return
+    await msg.delete()
+    await process_job(message, context, uid, job_text)
+
+
+@only_allowed
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await process_job_image(update.message, context, update.effective_user.id,
+                            update.message.photo[-1], "image/jpeg")
+
+
 # ================================================================ upload CV
 @only_allowed
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     ext = Path(doc.file_name or "").suffix.lower()
+    if ext in IMAGE_EXT:
+        if (doc.file_size or 0) > MAX_IMAGE_BYTES:
+            await update.message.reply_text("Gambarnya terlalu besar. Kirim sebagai foto biasa (bukan file) ya.")
+            return
+        await process_job_image(update.message, context, update.effective_user.id, doc, IMAGE_EXT[ext])
+        return
     if ext not in (".pdf", ".docx"):
-        await update.message.reply_text("Kirim CV dalam format PDF atau DOCX ya.")
+        await update.message.reply_text("Kirim CV dalam format PDF/DOCX, atau gambar lowongan (JPG/PNG).")
         return
 
     uid = update.effective_user.id
@@ -570,10 +692,21 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ================================================================ teks masuk
+MENU_ACTIONS = {
+    "🎯 Rekomendasi": rekomendasi, "📂 Lamaran": lamaran, "📬 Cek Balasan": cekbalasan,
+    "📊 Statistik": statistik, "👤 Profil": profil, "⚙️ Pengaturan": pengaturan,
+}
+
+
 @only_allowed
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     uid = update.effective_user.id
+
+    if text in MENU_ACTIONS:
+        context.user_data["awaiting_email"] = False
+        await MENU_ACTIONS[text](update, context)
+        return
 
     if context.user_data.get("awaiting_email"):
         if not EMAIL_RE.match(text):
@@ -624,14 +757,23 @@ async def show_send_confirmation(message, context, uid: int):
     name = (load_user(uid).get("profile") or {}).get("nama") or ""
     attach = attachment_path(context, uid)
     cv_type = "CV yang sudah disesuaikan" if context.user_data.get("tailored_cv") else "CV asli"
+    accounts = gmail_accounts.load()
+    if len(accounts) == 1:
+        buttons = [[("✅ Ya, kirim", "confirm:0")]]
+    else:
+        default = default_account(load_user(uid))
+        order = sorted(range(len(accounts)), key=lambda i: accounts[i] != default)
+        buttons = [[(f"{'⭐' if accounts[i] == default else '✅'} Kirim dari {accounts[i].address}", f"confirm:{i}")]
+                   for i in order]
     await message.reply_text(
         f"Konfirmasi pengiriman:\n\n"
         f"Ke: {context.user_data['recipient']}\n"
         f"Subjek: {email_subject(job, name)}\n"
         f"Lampiran: {Path(attach).name if attach else '-'} ({cv_type})\n"
         f"Isi: cover letter di atas\n\n"
-        f"Posisi: {job.get('posisi')} - {job.get('perusahaan')}",
-        reply_markup=kb([("✅ Ya, kirim", "confirm"), ("❌ Batal", "cancel")]))
+        f"Posisi: {job.get('posisi')} - {job.get('perusahaan')}" + (
+            f"\nDari: {accounts[0].address}" if len(accounts) == 1 else "\n\nPilih akun Gmail pengirimnya:"),
+        reply_markup=kb(*buttons, [("✏️ Ganti email tujuan", "editto"), ("❌ Batal", "cancel")]))
 
 
 # ================================================================ tombol
@@ -653,6 +795,30 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update_user(uid, lambda d: d.__setitem__("gaya", style))
         markup = kb([("🔄 Buat ulang cover letter", "cl")]) if context.user_data.get("job") else None
         await safe_edit(query.message, f"✅ Gaya cover letter diubah ke {GAYA_LABEL.get(style)}.", markup)
+        return
+
+    if action.startswith("set:"):
+        parts = action.split(":")
+        if parts[1] == "gaya":
+            text, markup = gaya_view(data)
+            await safe_edit(query.message, text, markup)
+            return
+        if parts[1] == "akun" and len(parts) == 2:
+            default = default_account(data)
+            rows = [[(f"{'⭐ ' if a == default else ''}{a.address}", f"set:akun:{i}")]
+                    for i, a in enumerate(gmail_accounts.load())]
+            await safe_edit(query.message, "Pilih akun Gmail default untuk mengirim lamaran:",
+                            kb(*rows, [("⬅️ Kembali", "set:back")]))
+            return
+        if parts[1] == "akun":
+            accounts = gmail_accounts.load()
+            idx = int(parts[2])
+            if idx < len(accounts):
+                update_user(uid, lambda d: d.__setitem__("gmail_default", accounts[idx].address))
+        elif parts[1] == "tog" and parts[2] in TOGGLES:
+            update_user(uid, lambda d: d.__setitem__(parts[2], not d.get(parts[2], True)))
+        text, markup = settings_view(load_user(uid))
+        await safe_edit(query.message, text, markup)
         return
 
     if action == "lamlist":
@@ -711,14 +877,17 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not app:
             await query.message.reply_text("Draft follow-up sudah tidak ada. Buat ulang lewat /lamaran.")
             return
-        if not gmail_configured():
-            await query.message.reply_text("GMAIL_ADDRESS / GMAIL_APP_PASSWORD belum diisi di .env.")
+        account = gmail_accounts.get(app.get("dari"))
+        if not account:
+            await query.message.reply_text(
+                f"Akun Gmail pengirim lamaran ini ({app.get('dari')}) tidak ada di .env." if app.get("dari")
+                else GMAIL_MISSING)
             return
         await query.edit_message_reply_markup(None)
-        msg = await query.message.reply_text("⏳ Mengirim follow-up...")
+        msg = await query.message.reply_text(f"⏳ Mengirim follow-up dari {account.address}...")
         subject = app.get("subjek") or email_subject(app, (data.get("profile") or {}).get("nama") or "")
         try:
-            await asyncio.to_thread(mailer.send_application, app["ke"], f"Re: {subject}",
+            await asyncio.to_thread(mailer.send_application, account, app["ke"], f"Re: {subject}",
                                     followup["text"], None, app.get("message_id"))
         except Exception as e:
             log.exception("kirim follow-up gagal")
@@ -799,7 +968,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("Buat cover letter dulu.")
             return
         if not gmail_configured():
-            await query.message.reply_text("GMAIL_ADDRESS / GMAIL_APP_PASSWORD belum diisi di .env.")
+            await query.message.reply_text(GMAIL_MISSING)
             return
         if job.get("email_hr"):
             context.user_data["recipient"] = job["email_hr"]
@@ -808,25 +977,32 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["awaiting_email"] = True
             await query.message.reply_text("Email HR tidak ditemukan di lowongan. Ketik alamat email tujuannya:")
 
-    elif action == "confirm":
+    elif action == "confirm" or action.startswith("confirm:"):
         recipient = context.user_data.get("recipient")
         if not recipient:
             await query.message.reply_text("Alamat tujuan belum ada.")
             return
+        accounts = gmail_accounts.load()
+        idx = int(action.split(":")[1]) if ":" in action else 0
+        if idx >= len(accounts):
+            await query.message.reply_text("Akun Gmail tidak ditemukan. Cek .env lalu coba kirim lagi.")
+            return
+        account = accounts[idx]
         await query.edit_message_reply_markup(None)
-        msg = await query.message.reply_text("⏳ Mengirim email...")
+        msg = await query.message.reply_text(f"⏳ Mengirim email dari {account.address}...")
         name = (data.get("profile") or {}).get("nama") or ""
         subject = email_subject(job, name)
         try:
             message_id = await asyncio.to_thread(
-                mailer.send_application, recipient, subject,
+                mailer.send_application, account, recipient, subject,
                 context.user_data["cover_letter"], attachment_path(context, uid))
         except Exception as e:
             log.exception("kirim email gagal")
-            await msg.edit_text(f"Gagal mengirim: {e}\nCek GMAIL_ADDRESS dan GMAIL_APP_PASSWORD di .env")
+            await msg.edit_text(f"Gagal mengirim: {e}\nCek alamat dan app password {account.address} di .env")
             return
         info = {
             "posisi": job.get("posisi"), "perusahaan": job.get("perusahaan"), "ke": recipient,
+            "dari": account.address,
             "skor": job.get("skor"), "bahasa": job.get("bahasa_lowongan"),
             "cv_disesuaikan": bool(context.user_data.get("tailored_cv")), "subjek": subject,
             "message_id": message_id, "gaya": data.get("gaya", "formal"),
@@ -835,9 +1011,14 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         app = update_user(uid, lambda d: tracker.add_application(d, info, TIMEZONE))
         context.user_data["cover_letter"] = None
         await msg.edit_text(
-            f"✅ Lamaran #{app['id']} terkirim ke {recipient}. Semoga lolos! 🍀\n\n"
+            f"✅ Lamaran #{app['id']} terkirim ke {recipient} dari {account.address}. Semoga lolos! 🍀\n\n"
             f"Balasan HR akan dicek otomatis, dan kalau {FOLLOWUP_DAYS} hari belum ada kabar "
             f"aku ingatkan untuk follow-up. Lihat semua lamaran di /lamaran.")
+
+    elif action == "editto":
+        context.user_data["awaiting_email"] = True
+        await query.edit_message_reply_markup(None)
+        await query.message.reply_text("Ketik alamat email tujuan yang benar:")
 
     elif action == "cancel":
         context.user_data["recipient"] = None
@@ -846,12 +1027,17 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ================================================================ main
+async def post_init(app: Application):
+    await app.bot.set_my_commands([BotCommand(name, desc) for name, desc in COMMANDS])
+
+
 def main():
     if not ALLOWED:
         log.warning("ALLOWED_USER_IDS kosong: SIAPA PUN bisa memakai bot ini, dan cek harian tidak aktif!")
 
     persistence = PicklePersistence(filepath=str(DATA_DIR / "bot_state.pkl"))
-    app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).persistence(persistence).build()
+    app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).persistence(persistence) \
+        .post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("profil", profil))
@@ -859,9 +1045,11 @@ def main():
     app.add_handler(CommandHandler(["lamaran", "riwayat"], lamaran))
     app.add_handler(CommandHandler("statistik", statistik))
     app.add_handler(CommandHandler("gaya", gaya))
+    app.add_handler(CommandHandler(["pengaturan", "config"], pengaturan))
     app.add_handler(CommandHandler("cekbalasan", cekbalasan))
     app.add_handler(CommandHandler("rekomendasi", rekomendasi))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_button))
 

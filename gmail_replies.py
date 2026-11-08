@@ -1,9 +1,10 @@
 """Mencari email balasan HR di Gmail untuk lamaran yang sudah dikirim."""
 import email
 import imaplib
-import os
 from email.utils import parseaddr
 
+import gmail_accounts
+from gmail_accounts import Account
 from job_alerts import _decode, _message_to_text
 
 # Domain email umum: untuk ini hanya alamat persis yang dicocokkan, bukan seluruh domain
@@ -23,9 +24,10 @@ def _pick_app(candidates: list[dict], subject: str, text: str) -> dict:
     return max(candidates, key=lambda a: a["id"])
 
 
-def find_replies(apps: list[dict], seen_ids: set, sent_dates: dict, per_query: int = 10) -> list[dict]:
-    user = os.environ["GMAIL_ADDRESS"]
-    password = os.environ["GMAIL_APP_PASSWORD"].replace(" ", "")
+def find_replies(account: Account, apps: list[dict], seen_ids: set, sent_dates: dict,
+                 per_query: int = 10) -> list[dict]:
+    """Cari balasan di inbox akun yang dipakai mengirim lamaran-lamaran ini."""
+    own = gmail_accounts.own_addresses()
 
     queries = {}  # kriteria FROM -> daftar lamaran
     for app in apps:
@@ -39,7 +41,7 @@ def find_replies(apps: list[dict], seen_ids: set, sent_dates: dict, per_query: i
 
     results, processed = [], set()
     with imaplib.IMAP4_SSL("imap.gmail.com") as imap:
-        imap.login(user, password)
+        imap.login(account.address, account.password)
         imap.select("INBOX", readonly=True)
         for criterion, candidates in queries.items():
             since = min(sent_dates[a["id"]] for a in candidates).strftime("%d-%b-%Y")
@@ -57,7 +59,7 @@ def find_replies(apps: list[dict], seen_ids: set, sent_dates: dict, per_query: i
                 msg_id = (msg.get("Message-ID") or num.decode()).strip()
                 if msg_id in seen_ids:
                     continue
-                if parseaddr(msg.get("From"))[1].lower() == user.lower():
+                if parseaddr(msg.get("From"))[1].lower() in own:
                     continue
                 subject = _decode(msg.get("Subject"))
                 text, _ = _message_to_text(msg)

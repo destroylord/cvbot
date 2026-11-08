@@ -5,6 +5,7 @@ Provider AI dipilih lewat AI_PROVIDER di .env:
   ollama -> model lokal gratis di komputer sendiri (https://ollama.com)
   claude -> Claude API (berbayar, key dari https://console.anthropic.com)
 """
+import base64
 import json
 import os
 import re
@@ -12,29 +13,33 @@ import re
 import requests
 
 
-def _ask(system: str, prompt: str, max_tokens: int = 2000) -> str:
+def _ask(system: str, prompt: str, max_tokens: int = 2000, image: tuple[bytes, str] | None = None) -> str:
+    """image: (isi file, mime type), misalnya poster lowongan."""
     provider = os.getenv("AI_PROVIDER", "gemini").strip().lower()
     if provider == "gemini":
-        text = _ask_gemini(system, prompt)
+        text = _ask_gemini(system, prompt, image)
     elif provider == "ollama":
-        text = _ask_ollama(system, prompt)
+        text = _ask_ollama(system, prompt, image)
     elif provider == "claude":
-        text = _ask_claude(system, prompt, max_tokens)
+        text = _ask_claude(system, prompt, max_tokens, image)
     else:
         raise ValueError(f"AI_PROVIDER tidak dikenal: {provider} (pilih gemini, ollama, atau claude)")
     # Beberapa model lokal menulis proses berpikirnya di <think>...</think>, buang bagian itu
     return re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
 
 
-def _ask_gemini(system: str, prompt: str) -> str:
+def _ask_gemini(system: str, prompt: str, image: tuple[bytes, str] | None = None) -> str:
     model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    parts = [{"text": prompt}]
+    if image:
+        parts.insert(0, {"inline_data": {"mime_type": image[1], "data": base64.b64encode(image[0]).decode()}})
     resp = requests.post(
         url,
         headers={"x-goog-api-key": os.environ["GEMINI_API_KEY"], "Content-Type": "application/json"},
         json={
             "systemInstruction": {"parts": [{"text": system}]},
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "contents": [{"role": "user", "parts": parts}],
         },
         timeout=180,
     )
@@ -49,13 +54,19 @@ def _ask_gemini(system: str, prompt: str) -> str:
     return "".join(p.get("text", "") for p in parts if not p.get("thought"))
 
 
-def _ask_ollama(system: str, prompt: str) -> str:
+def _ask_ollama(system: str, prompt: str, image: tuple[bytes, str] | None = None) -> str:
     base = os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/")
+    user_msg = {"role": "user", "content": prompt}
+    model = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
+    if image:
+        # Model teks biasa tidak bisa membaca gambar, pakai model vision
+        model = os.getenv("OLLAMA_VISION_MODEL", "qwen2.5vl:7b")
+        user_msg["images"] = [base64.b64encode(image[0]).decode()]
     resp = requests.post(
         f"{base}/api/chat",
         json={
-            "model": os.getenv("OLLAMA_MODEL", "qwen2.5:7b"),
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+            "model": model,
+            "messages": [{"role": "system", "content": system}, user_msg],
             "stream": False,
             "options": {"num_ctx": 16384},
         },
@@ -69,16 +80,20 @@ def _ask_ollama(system: str, prompt: str) -> str:
 _claude_client = None
 
 
-def _ask_claude(system: str, prompt: str, max_tokens: int) -> str:
+def _ask_claude(system: str, prompt: str, max_tokens: int, image: tuple[bytes, str] | None = None) -> str:
     global _claude_client
     from anthropic import Anthropic  # hanya di-import kalau memang pakai Claude
     if _claude_client is None:
         _claude_client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    content = [{"type": "text", "text": prompt}]
+    if image:
+        content.insert(0, {"type": "image", "source": {
+            "type": "base64", "media_type": image[1], "data": base64.b64encode(image[0]).decode()}})
     resp = _claude_client.messages.create(
         model=os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5"),
         max_tokens=max_tokens,
         system=system,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role": "user", "content": content}],
     )
     return "".join(b.text for b in resp.content if b.type == "text")
 
@@ -125,6 +140,20 @@ PROFIL KANDIDAT:
 TEKS LOWONGAN:
 {job_text[:8000]}"""
     return _parse_json(_ask("Kamu adalah rekruter berpengalaman. " + JSON_ONLY, prompt))
+
+
+def read_job_image(image: bytes, mime: str, caption: str = "") -> str:
+    """Salin isi poster/screenshot lowongan menjadi teks, supaya bisa diproses seperti lowongan biasa."""
+    prompt = """Salin SEMUA teks di gambar lowongan kerja ini apa adanya: posisi, perusahaan,
+kualifikasi, jobdesk, lokasi, gaji, tenggat, dan terutama alamat email / cara melamar
+(salin alamat email persis, huruf demi huruf). Jangan menambah info yang tidak ada di gambar.
+Jika gambar bukan lowongan kerja, balas persis: BUKAN_LOWONGAN"""
+    if caption:
+        prompt += f"\n\nKeterangan yang dikirim bersama gambar:\n{caption[:3000]}"
+    text = _ask("Kamu menyalin teks dari gambar dengan teliti.", prompt, max_tokens=3000, image=(image, mime))
+    if caption and caption not in text:
+        text += f"\n\nKeterangan tambahan:\n{caption}"
+    return text
 
 
 def extract_and_rank(profile: dict, email_text: str, sender: str) -> list[dict]:

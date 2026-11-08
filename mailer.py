@@ -1,17 +1,17 @@
 """Kirim email lewat Gmail (SMTP + App Password)."""
 import mimetypes
-import os
 import smtplib
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 from pathlib import Path
 
+from gmail_accounts import Account
 
-def send_application(to: str, subject: str, body: str, attachment_path: str | None = None,
+
+def send_application(account: Account, to: str, subject: str, body: str, attachment_path: str | None = None,
                      in_reply_to: str | None = None) -> str:
     """Kirim email. Mengembalikan Message-ID supaya follow-up bisa masuk ke thread yang sama."""
-    sender = os.environ["GMAIL_ADDRESS"]
-    password = os.environ["GMAIL_APP_PASSWORD"].replace(" ", "")
+    sender = account.address
 
     msg = EmailMessage()
     msg["From"] = sender
@@ -32,6 +32,6 @@ def send_application(to: str, subject: str, body: str, attachment_path: str | No
                            filename=Path(attachment_path).name)
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-        smtp.login(sender, password)
+        smtp.login(sender, account.password)
         smtp.send_message(msg)
     return message_id

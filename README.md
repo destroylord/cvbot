@@ -10,12 +10,15 @@ per lowongan (tetap jujur), membuat cover letter, lalu kirim lamaran via Gmail
 2. Dapatkan lowongan dengan salah satu cara:
    - ketik `/rekomendasi` (atau tunggu cek otomatis harian), bot membaca email job alert
      dari JobStreet/Glints/LinkedIn/Kalibrr di Gmail kamu, lalu tekan **Proses** di lowongan yang menarik, atau
-   - kirim link lowongan / paste teks deskripsinya.
+   - kirim link lowongan / paste teks deskripsinya, atau
+   - kirim **foto/screenshot poster lowongan**. Bot membaca isinya (termasuk email HR) pakai AI.
+     Lowongan dari grup/channel lain cukup di-**forward** ke bot.
 3. Bot memberi skor kecocokan. Kalau skor di bawah `CV_TAILOR_THRESHOLD` (default 70),
    CV otomatis disesuaikan dan dikirim sebagai PDF baru, lengkap dengan skor sebelum/sesudah
    dan daftar perubahannya. Untuk skor tinggi, ada tombol **Sesuaikan CV** kalau mau.
 4. Tekan **Buat Cover Letter**, revisi pakai `/revisi <instruksi>` kalau perlu.
-5. Tekan **Kirim via Gmail**, cek konfirmasi, tekan **Ya, kirim**.
+5. Tekan **Kirim via Gmail**, cek konfirmasi, tekan **Ya, kirim** (atau **Kirim dari ...**
+   kalau kamu memakai beberapa akun Gmail).
    CV yang dilampirkan otomatis versi yang sudah disesuaikan (kalau ada).
 
 ## Soal penyesuaian CV
@@ -48,6 +51,10 @@ bukan dimasukkan ke CV. Tetap baca CV hasilnya sebelum mengirim.
    - Aktifkan verifikasi 2 langkah di akun Google kamu.
    - Buka https://myaccount.google.com/apppasswords, buat app password baru, salin 16 karakternya.
    - Kalau login IMAP gagal, cek pengaturan Gmail > Lihat semua setelan > Penerusan dan POP/IMAP.
+   - **Lebih dari satu akun**: isi `GMAIL_ADDRESS_2` / `GMAIL_APP_PASSWORD_2`, `_3`, dst.
+     (app password dibuat terpisah di tiap akun). Job alert dibaca dari semua akun, dan saat
+     konfirmasi kirim kamu memilih akun pengirimnya. Balasan HR dicek dan follow-up dikirim
+     dari akun yang sama dengan lamarannya.
 6. **Aktifkan job alert** di JobStreet, Glints, LinkedIn, dll. dengan email Gmail yang sama.
    Atur kata kunci dan lokasi sesuai posisi yang kamu incar.
 7. Salin `.env.example` menjadi `.env`, lalu isi semua nilainya.
@@ -57,12 +64,40 @@ bukan dimasukkan ke CV. Tetap baca CV hasilnya sebelum mengirim.
    ```
    Bot harus tetap berjalan supaya cek harian bisa jalan.
 
+## Jalan otomatis di background (Windows)
+
+Supaya tidak perlu menjalankan `python bot.py` setiap kali, buka PowerShell di folder ini lalu:
+
+```
+.\bot.ps1 install
+```
+
+Bot langsung jalan tanpa jendela, otomatis start setiap kamu login Windows, dan restart sendiri
+kalau crash. Perintah lain:
+
+- `.\bot.ps1 status` - cek bot jalan atau tidak + 10 baris log terakhir
+- `.\bot.ps1 log` - lihat log secara langsung (Ctrl+C untuk keluar), file-nya di `data\bot.log`
+- `.\bot.ps1 restart` - wajib setelah mengubah `.env` atau kode
+- `.\bot.ps1 stop` / `.\bot.ps1 start`
+- `.\bot.ps1 uninstall` - hentikan dan hapus dari autostart
+
+Kalau muncul error "running scripts is disabled", jalankan sekali:
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+
+Bot hanya jalan selama komputer menyala dan kamu login. Jangan jalankan `python bot.py` manual
+saat versi background aktif, karena dua bot dengan token yang sama akan saling bentrok.
+Kalau mau benar-benar 24 jam, jalankan di VPS.
+
 ## Perintah
+
+Tombol menu muncul di bawah kolom chat setelah `/start`, dan daftar perintah ada di tombol **Menu**
+di samping kolom chat, jadi tidak perlu hafal perintahnya.
 
 - `/rekomendasi` - cek email job alert sekarang
 - `/lamaran` - daftar lamaran, ubah status, buat follow-up
 - `/statistik` - statistik lamaran (tingkat respons, interview, per minggu)
 - `/cekbalasan` - cek balasan HR di Gmail sekarang
+- `/pengaturan` (atau `/config`) - gaya cover letter, akun Gmail default, nyala/matikan cek otomatis
 - `/gaya` - atur gaya cover letter (formal, santai, singkat)
 - `/profil` - lihat hasil scan CV
 - `/revisi <instruksi>` - revisi cover letter atau email follow-up terakhir
@@ -86,5 +121,7 @@ bukan dimasukkan ke CV. Tetap baca CV hasilnya sebelum mengirim.
 - Bot hanya membaca email job alert (mode read-only, email tidak ditandai sudah dibaca).
 - Halaman lowongan JobStreet/LinkedIn sering diblokir untuk bot. Kalau tombol **Proses** gagal,
   buka link-nya lalu copy-paste deskripsi lowongan ke bot.
-- PDF hasil scan (gambar) tidak bisa dibaca. Pakai PDF yang di-export dari Word/Canva/Google Docs.
+- Hasil baca foto lowongan bisa salah, terutama alamat email. Cek alamat tujuan di layar konfirmasi
+  dan pakai **Ganti email tujuan** kalau keliru. Untuk Ollama, foto butuh model vision (`OLLAMA_VISION_MODEL`).
+- PDF CV hasil scan (gambar) tidak bisa dibaca. Pakai PDF yang di-export dari Word/Canva/Google Docs.
 - Semua data (CV, profil, riwayat) tersimpan di folder `data/`.
