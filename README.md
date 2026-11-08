@@ -138,6 +138,13 @@ Isi **⚙️ Pengaturan**:
   dan tetap harus kamu konfirmasi dulu.
 - Lamaran yang kamu kirim di luar bot tidak tercatat.
 
+## Notifikasi
+
+- Rekomendasi harian dan pengingat follow-up masing-masing dikirim dalam **satu pesan**, tanpa suara.
+- Balasan HR dikirim satu pesan per balasan. Yang **berbunyi** hanya undangan interview, tawaran kerja,
+  dan permintaan info dari HR. Penolakan dan konfirmasi otomatis masuk tanpa suara.
+- Pesan "⏳ ..." otomatis diganti hasilnya atau dihapus setelah selesai.
+
 ## Catatan
 
 - Isi `ALLOWED_USER_IDS`, kalau tidak siapa pun yang menemukan bot kamu bisa memakai Gmail kamu.

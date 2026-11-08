@@ -13,6 +13,9 @@
 | Email tujuan | Tidak bisa diganti di konfirmasi | Tombol **✏️ Ganti email tujuan** |
 | Menjalankan bot | `python bot.py`, harus tetap terbuka | `./bot.sh install`: service systemd di VPS, jalan di background |
 | Log | Hanya di terminal | Juga di `data/bot.log` dan `journalctl` |
+| Rekomendasi harian | 1 pesan per lowongan (bisa 8+ pesan) | 1 pesan berisi semua lowongan, tombol per lowongan |
+| Pengingat follow-up | 1 pesan per lamaran | 1 pesan berisi semua lamaran yang perlu di-follow-up |
+| Notifikasi | Semua berbunyi | Hanya yang penting yang berbunyi |
 
 ### 1. Banyak akun Gmail
 
@@ -79,7 +82,21 @@ dan restart sendiri 10 detik setelah crash. Langkah lengkapnya ada di
 ./bot.sh uninstall   # hentikan & hapus service
 ```
 
-### 5. Lain-lain
+### 5. Chat lebih rapi
+
+- **Rekomendasi**: semua lowongan dikirim dalam satu pesan bernomor. Tiap lowongan punya satu baris
+  tombol: **🔍 Proses** dan **🌐 Buka**.
+- **Pengingat follow-up**: semua lamaran yang sudah `FOLLOWUP_DAYS` hari tanpa kabar digabung dalam
+  satu pesan, dengan tombol **📨 Follow-up #id** dan **👻 #id tidak ada kabar** per lamaran.
+  Menekan tombolnya mengirim pesan baru, jadi daftar aslinya tetap utuh.
+- **Pesan "⏳ Mengecek ..."** dari `/rekomendasi` dan `/cekbalasan` diganti hasilnya atau dihapus
+  setelah selesai, jadi tidak menumpuk.
+- **Notifikasi tanpa suara** untuk yang rutin: rekomendasi harian, pengingat follow-up, dan balasan HR
+  berupa penolakan atau konfirmasi otomatis. Yang tetap **berbunyi**: undangan interview,
+  tawaran kerja, dan HR meminta info (karena perlu kamu tindak lanjuti).
+  Daftarnya diatur di `LOUD_REPLIES` di `bot.py`.
+
+### 6. Lain-lain
 
 - `.gitignore`: `.env` (password & token) dan `data/` (CV & data lamaran) tidak ikut ter-commit.
 - `.gitattributes`: `*.sh` selalu LF supaya bisa jalan di Linux walau di-commit dari Windows.

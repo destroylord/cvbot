@@ -76,6 +76,9 @@ COMMANDS = [
     ("start", "Cara pakai & tampilkan menu"),
 ]
 
+# Jenis balasan HR yang tetap berbunyi; notifikasi lain dikirim tanpa suara
+LOUD_REPLIES = {"interview", "diterima", "info"}
+
 EMAIL_RE = re.compile(r"^[\w.+-]+@[\w-]+(\.[\w-]+)+$")
 URL_RE = re.compile(r"https?://\S+")
 
@@ -107,6 +110,19 @@ async def safe_edit(message, text, reply_markup=None):
     except BadRequest as e:
         if "not modified" not in str(e).lower():
             raise
+
+
+async def finish_progress(progress, text: str | None = None):
+    """Pesan "⏳ ..." diganti hasil akhirnya, atau dihapus kalau hasilnya dikirim sebagai pesan lain."""
+    if progress is None:
+        return
+    try:
+        if text:
+            await progress.edit_text(text)
+        else:
+            await progress.delete()
+    except BadRequest:
+        pass
 
 
 def user_dir(uid: int) -> Path:
@@ -344,8 +360,11 @@ async def send_recommendations(context, uid: int, chat_id: int, silent_if_empty:
         return
 
     accounts = gmail_accounts.load()
-    await say(f"⏳ Mengecek email job alert di {len(accounts)} akun Gmail..."
-              if len(accounts) > 1 else "⏳ Mengecek email job alert...")
+    progress = None
+    if not silent_if_empty:
+        progress = await bot.send_message(
+            chat_id, f"⏳ Mengecek email job alert di {len(accounts)} akun Gmail..."
+            if len(accounts) > 1 else "⏳ Mengecek email job alert...")
     seen = list(data.get("gmail_seen") or [])
     emails, failed = [], []
     for account in accounts:
@@ -361,6 +380,7 @@ async def send_recommendations(context, uid: int, chat_id: int, silent_if_empty:
     if failed:
         await say("Gagal membaca Gmail:\n" + "\n".join(failed))
         if len(failed) == len(accounts):
+            await finish_progress(progress)
             return
 
     jobs = []
@@ -390,26 +410,33 @@ async def send_recommendations(context, uid: int, chat_id: int, silent_if_empty:
                  key=lambda j: j.get("skor") or 0, reverse=True)[:MAX_RECS]
 
     if not top:
-        await say(f"Tidak ada rekomendasi baru dengan skor ≥ {MIN_REC_SCORE} "
-                  f"({len(emails)} email baru dicek, {len(unique)} lowongan ditemukan).")
+        await finish_progress(progress, f"Tidak ada rekomendasi baru dengan skor ≥ {MIN_REC_SCORE} "
+                                        f"({len(emails)} email baru dicek, {len(unique)} lowongan ditemukan).")
         return
+    await finish_progress(progress)
 
+    # Semua rekomendasi dalam satu pesan, satu baris tombol per lowongan
     recs = context.user_data.setdefault("recs", {})
-    await bot.send_message(chat_id, f"🎯 {len(top)} lowongan yang cocok dengan CV kamu:")
-    for job in top:
+    lines = [f"🎯 {len(top)} lowongan yang cocok dengan CV kamu:"]
+    rows = []
+    for i, job in enumerate(top, 1):
         rid = hashlib.md5(f"{job.get('posisi')}|{job.get('perusahaan')}|{job.get('link')}".encode()).hexdigest()[:10]
         recs[rid] = job
-        text = (f"{job.get('skor')}/100 · {job.get('posisi')}\n"
-                f"🏢 {job.get('perusahaan')}" + (f" · {job.get('lokasi')}" if job.get("lokasi") else "") +
-                f"\n💬 {job.get('alasan') or ''}")
-        buttons = [InlineKeyboardButton("🔍 Proses", callback_data=f"rec:{rid}")]
+        lines.append(f"\n{i}. {job.get('skor')}/100 · {job.get('posisi')}\n"
+                     f"🏢 {job.get('perusahaan')}" + (f" · {job.get('lokasi')}" if job.get("lokasi") else "") +
+                     f"\n💬 {(job.get('alasan') or '')[:160]}")
+        row = [InlineKeyboardButton(f"🔍 {i}. {str(job.get('posisi') or '')[:24]}", callback_data=f"rec:{rid}")]
         link = job.get("link") or ""
         if link.startswith("http"):
-            buttons.append(InlineKeyboardButton("🌐 Buka", url=link))
-        try:
-            await bot.send_message(chat_id, text, reply_markup=InlineKeyboardMarkup([buttons]))
-        except BadRequest:
-            await bot.send_message(chat_id, text, reply_markup=InlineKeyboardMarkup([buttons[:1]]))
+            row.append(InlineKeyboardButton("🌐 Buka", url=link))
+        rows.append(row)
+    text = "\n".join(lines)[:4000]
+    try:
+        await bot.send_message(chat_id, text, reply_markup=InlineKeyboardMarkup(rows),
+                               disable_notification=silent_if_empty)
+    except BadRequest:  # biasanya karena ada link yang tidak valid untuk tombol
+        await bot.send_message(chat_id, text, reply_markup=InlineKeyboardMarkup([r[:1] for r in rows]),
+                               disable_notification=silent_if_empty)
     while len(recs) > 50:
         recs.pop(next(iter(recs)))
 
@@ -438,13 +465,17 @@ async def reply_check_job(context: ContextTypes.DEFAULT_TYPE):
 # ================================================================ follow-up & balasan HR
 async def send_followup_reminders(context, uid: int, chat_id: int):
     due = update_user(uid, lambda d: tracker.pop_due_reminders(d, FOLLOWUP_DAYS, TIMEZONE))
-    for app in due:
-        await context.bot.send_message(
-            chat_id,
-            f"⏰ Sudah {tracker.days_since(app, TIMEZONE)} hari belum ada kabar dari lamaran #{app['id']}\n"
-            f"{app.get('posisi')} - {app.get('perusahaan')}\n\nMau kirim email follow-up?",
-            reply_markup=kb([("📨 Buat Draft Follow-up", f"fu:{app['id']}")],
-                            [("👻 Tandai tidak ada kabar", f"st:{app['id']}:tidak_ada_kabar")]))
+    if not due:
+        return
+    lines = [f"#{a['id']} {a.get('posisi')} - {a.get('perusahaan')} ({tracker.days_since(a, TIMEZONE)} hari)"
+             for a in due]
+    rows = [[(f"📨 Follow-up #{a['id']}", f"fu:{a['id']}"), (f"👻 #{a['id']} tidak ada kabar", f"str:{a['id']}:tidak_ada_kabar")]
+            for a in due]
+    await context.bot.send_message(
+        chat_id,
+        f"⏰ {len(due)} lamaran belum ada kabar setelah {FOLLOWUP_DAYS} hari:\n\n" + "\n".join(lines) +
+        "\n\nMau kirim email follow-up?",
+        reply_markup=kb(*rows), disable_notification=True)
 
 
 async def check_replies(context, uid: int, chat_id: int, manual: bool = False):
@@ -465,7 +496,7 @@ async def check_replies(context, uid: int, chat_id: int, manual: bool = False):
         await say("Tidak ada lamaran aktif yang perlu dicek balasannya.")
         return
 
-    await say("⏳ Mengecek balasan HR di Gmail...")
+    progress = await bot.send_message(chat_id, "⏳ Mengecek balasan HR di Gmail...") if manual else None
     sent_dates = {a["id"]: tracker.sent_at(a, TIMEZONE) for a in apps}
     by_account = {}
     for a in apps:
@@ -520,10 +551,13 @@ async def check_replies(context, uid: int, chat_id: int, manual: bool = False):
             text += f"\n👉 Perlu dilakukan: {info['perlu_tindakan']}"
         if changed:
             text += f"\n\nStatus otomatis diubah ke {tracker.STATUS[a['status']]} (bisa diganti lewat /lamaran)."
-        await bot.send_message(chat_id, text, reply_markup=kb([("📋 Lihat detail lamaran", f"app:{a['id']}")]))
+        await bot.send_message(chat_id, text, reply_markup=kb([("📋 Lihat detail lamaran", f"app:{a['id']}")]),
+                               disable_notification=info.get("jenis") not in LOUD_REPLIES)
 
     if manual and not found and failed < len(by_account):
-        await bot.send_message(chat_id, "Belum ada balasan baru dari HR.")
+        await finish_progress(progress, "Belum ada balasan baru dari HR.")
+    else:
+        await finish_progress(progress)
 
 
 def followup_view(data: dict, followup: dict) -> dict:
@@ -835,8 +869,9 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(text, reply_markup=markup)
         return
 
-    if action.startswith("st:"):
-        _, app_id, status = action.split(":", 2)
+    if action.startswith(("st:", "str:")):
+        # "str:" dipakai dari pesan berisi banyak lamaran: hasilnya dikirim sebagai pesan baru
+        prefix, app_id, status = action.split(":", 2)
 
         def change(d):
             a = tracker.find(d, int(app_id))
@@ -847,7 +882,10 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         app = update_user(uid, change)
         if app:
             text, markup = app_detail_view(app)
-            await safe_edit(query.message, text, markup)
+            if prefix == "str":
+                await query.message.reply_text(text, reply_markup=markup)
+            else:
+                await safe_edit(query.message, text, markup)
         return
 
     if action.startswith("fu:"):
