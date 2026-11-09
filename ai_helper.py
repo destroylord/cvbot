@@ -68,15 +68,16 @@ def claude_uses_login() -> bool:
     return setting("CLAUDE_AUTH") == "login"
 
 
-def _ask(system: str, prompt: str, max_tokens: int = 2000, image: tuple[bytes, str] | None = None) -> str:
+def _ask(system: str, prompt: str, max_tokens: int = 2000, image: tuple[bytes, str] | None = None,
+         json_mode: bool = False) -> str:
     """image: (isi file, mime type), misalnya poster lowongan."""
     name = provider()
     if name == "gemini":
-        text = _ask_gemini(system, prompt, image)
+        text = _ask_gemini(system, prompt, image, json_mode)
     elif name == "openai":
         text = _ask_openai(system, prompt, max_tokens, image)
     elif name == "ollama":
-        text = _ask_ollama(system, prompt, image)
+        text = _ask_ollama(system, prompt, image, json_mode)
     elif name == "claude":
         text = _ask_claude(system, prompt, max_tokens, image)
     else:
@@ -213,11 +214,13 @@ def _post_with_retry(url: str, headers: dict, body: dict, retry_429: bool) -> re
 
 
 # ---------------------------------------------------------------- Gemini
-def _ask_gemini(system: str, prompt: str, image: tuple[bytes, str] | None = None) -> str:
+def _ask_gemini(system: str, prompt: str, image: tuple[bytes, str] | None = None, json_mode: bool = False) -> str:
     parts = [{"text": prompt}]
     if image:
         parts.insert(0, {"inline_data": {"mime_type": image[1], "data": base64.b64encode(image[0]).decode()}})
     body = {"systemInstruction": {"parts": [{"text": system}]}, "contents": [{"role": "user", "parts": parts}]}
+    if json_mode:  # Gemini menjamin jawaban berupa JSON
+        body["generationConfig"] = {"responseMimeType": "application/json"}
     return _with_fallback("gemini", "Gemini", lambda model: _gemini_request(model, body))
 
 
@@ -278,7 +281,7 @@ def _openai_request(model: str, messages: list, max_tokens: int) -> str:
 
 
 # ---------------------------------------------------------------- Ollama
-def _ask_ollama(system: str, prompt: str, image: tuple[bytes, str] | None = None) -> str:
+def _ask_ollama(system: str, prompt: str, image: tuple[bytes, str] | None = None, json_mode: bool = False) -> str:
     base = setting("OLLAMA_URL").rstrip("/")
     user_msg = {"role": "user", "content": prompt}
     model = setting("OLLAMA_MODEL")
@@ -293,6 +296,7 @@ def _ask_ollama(system: str, prompt: str, image: tuple[bytes, str] | None = None
             "messages": [{"role": "system", "content": system}, user_msg],
             "stream": False,
             "options": {"num_ctx": 16384},
+            **({"format": "json"} if json_mode else {}),
         },
         timeout=600,  # model lokal bisa lambat
     )
@@ -442,10 +446,84 @@ def ping() -> str:
     return _ask("Kamu sedang dites koneksinya.", "Balas hanya dengan kata: OK", max_tokens=20)
 
 
+def _close_truncated(text: str) -> str:
+    """Tutup JSON yang terpotong: string yang belum ditutup dan kurung { [ yang masih terbuka."""
+    stack, in_string, escape = [], False, False
+    for ch in text:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]" and stack:
+            stack.pop()
+    out = text + ('"' if in_string else "")
+    out = re.sub(r"[,:]\s*$", "", out.rstrip())
+    return out + "".join(reversed(stack))
+
+
 def _parse_json(text: str) -> dict:
-    text = re.sub(r"```(?:json)?", "", text).strip()
-    match = re.search(r"\{.*\}", text, re.S)
-    return json.loads(match.group(0) if match else text)
+    """JSON dari jawaban AI. Membuang teks/kode pembuka, koma berlebih, dan menutup JSON yang terpotong."""
+    text = re.sub(r"```(?:json)?", "", str(text or "")).strip()
+    start = text.find("{")
+    if start < 0:
+        raise ValueError("jawaban AI tidak berisi JSON")
+    text = text[start:]
+    decoder = json.JSONDecoder()
+    no_trailing = _strip_trailing_commas(text)
+    for candidate in (text, no_trailing, _strip_trailing_commas(_close_truncated(no_trailing))):
+        try:
+            value, _ = decoder.raw_decode(candidate)
+            if isinstance(value, dict):
+                return value
+        except json.JSONDecodeError:
+            continue
+    return json.loads(text)  # gagal: lempar error aslinya
+
+
+def _strip_trailing_commas(text: str) -> str:
+    """Buang koma sebelum } atau ] (kesalahan AI yang paling sering). Koma di dalam teks tidak disentuh."""
+    out, in_string, escape = [], False, False
+    for i, ch in enumerate(text):
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch == ",":
+            rest = text[i + 1:].lstrip()
+            if rest[:1] in ("}", "]"):
+                continue
+        out.append(ch)
+    return "".join(out)
+
+
+def _ask_json(system: str, prompt: str, max_tokens: int = 2000, image: tuple[bytes, str] | None = None) -> dict:
+    """Minta jawaban JSON. Kalau rusak, AI diminta mengulang sekali sebelum menyerah."""
+    raw = _ask(system, prompt, max_tokens, image, json_mode=True)
+    try:
+        return _parse_json(raw)
+    except (ValueError, json.JSONDecodeError) as e:
+        log.warning("jawaban AI bukan JSON valid (%s), minta ulang. Awal jawaban: %s", e, raw[:1500])
+    retry = (prompt + "\n\nPENTING: jawabanmu sebelumnya bukan JSON valid. Balas ulang dengan JSON valid saja, "
+             "tanpa teks lain, tanpa koma di akhir daftar, dan pastikan semua kurung ditutup.")
+    raw = _ask(system, retry, max_tokens, image, json_mode=True)
+    try:
+        return _parse_json(raw)
+    except (ValueError, json.JSONDecodeError) as e:
+        log.error("jawaban AI tetap bukan JSON valid (%s). Awal jawaban: %s", e, raw[:1500])
+        raise RuntimeError("AI mengembalikan jawaban dengan format rusak dua kali. Coba lagi sebentar lagi, "
+                           "atau ganti model di ⚙️ Pengaturan > 🤖 Model AI.") from e
 
 
 JSON_ONLY = "Balas HANYA dengan JSON valid, tanpa teks lain."
@@ -463,7 +541,7 @@ Isi null / list kosong jika tidak ada. Jangan mengarang data apa pun.
 
 CV:
 {cv_text[:12000]}"""
-    return _parse_json(_ask("Kamu adalah parser CV. " + JSON_ONLY, prompt, max_tokens=3000))
+    return _ask_json("Kamu adalah parser CV. " + JSON_ONLY, prompt, max_tokens=3000)
 
 
 # ---------------------------------------------------------------- lowongan
@@ -487,7 +565,7 @@ PROFIL KANDIDAT:
 
 TEKS LOWONGAN:
 {job_text[:8000]}"""
-    return _parse_json(_ask("Kamu adalah rekruter berpengalaman. " + JSON_ONLY, prompt))
+    return _ask_json("Kamu adalah rekruter berpengalaman. " + JSON_ONLY, prompt)
 
 
 def read_job_image(image: bytes, mime: str, caption: str = "") -> str:
@@ -524,7 +602,7 @@ PROFIL KANDIDAT:
 
 ISI EMAIL:
 {email_text[:14000]}"""
-    return _parse_json(_ask(JSON_ONLY, prompt, max_tokens=3000)).get("lowongan") or []
+    return _ask_json(JSON_ONLY, prompt, max_tokens=3000).get("lowongan") or []
 
 
 # ---------------------------------------------------------------- persiapan interview
@@ -554,8 +632,8 @@ SKILL & HASIL TAMBAHAN YANG DIKONFIRMASI KANDIDAT:
 
 LOWONGAN:
 {(app.get('job_text') or '')[:5000]}"""
-    return _parse_json(_ask("Kamu adalah pelatih interview kerja yang jujur dan praktis. " + JSON_ONLY, prompt,
-                            max_tokens=4000))
+    return _ask_json("Kamu adalah pelatih interview kerja yang jujur dan praktis. " + JSON_ONLY, prompt,
+                            max_tokens=6000)
 
 
 def interview_feedback(question: str, answer: str, profile: dict, posisi: str) -> str:
@@ -640,7 +718,7 @@ SKILL TAMBAHAN DARI KANDIDAT (belum tertulis di CV, sudah dikonfirmasi kandidat)
 
 LOWONGAN:
 {job_text[:7000]}"""
-    result = _parse_json(_ask(system, prompt, max_tokens=6000))
+    result = _ask_json(system, prompt, max_tokens=6000)
     if not ask_missing:
         result["perlu_hasil"] = []
     return result
@@ -695,7 +773,7 @@ CV:
 
 HASIL DARI KANDIDAT (sudah dikonfirmasi kandidat, boleh dipakai sebagai Result):
 {facts_text}"""
-    result = _parse_json(_ask(system, prompt, max_tokens=6000))
+    result = _ask_json(system, prompt, max_tokens=6000)
     if not ask_missing:
         result["perlu_hasil"] = []
     return result
@@ -861,4 +939,4 @@ DARI: {sender}
 SUBJEK: {subject}
 ISI:
 {text[:5000]}"""
-    return _parse_json(_ask(JSON_ONLY, prompt, max_tokens=800))
+    return _ask_json(JSON_ONLY, prompt, max_tokens=800)

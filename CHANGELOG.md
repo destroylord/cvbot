@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-11-09 (lanjutan): perbaikan "Gagal menyiapkan interview: Expecting value: line ... column ..."
+
+Penyebab: AI sesekali mengembalikan JSON yang tidak valid, paling sering ada koma berlebih sebelum `]` atau `}`,
+atau jawabannya terpotong. Ini bisa terjadi di semua fitur yang meminta JSON (scan CV, analisis lowongan,
+rekomendasi, penyesuaian CV, perbaikan PAR, persiapan interview, klasifikasi balasan HR), jadi diperbaiki di satu
+tempat:
+
+- **Mode JSON bawaan provider**: Gemini (`responseMimeType: application/json`) dan Ollama (`format: json`). Teks
+  biasa seperti email lamaran tidak terpengaruh.
+- **Perbaikan otomatis** (`_parse_json`): teks/kode pembuka dibuang, koma berlebih dihapus tanpa menyentuh koma di
+  dalam teks, dan JSON yang terpotong ditutup. JSON yang sudah valid selalu dibaca apa adanya dulu.
+- **Coba ulang sekali** (`_ask_json`): kalau masih rusak, AI diminta mengulang. Kalau gagal lagi, pesannya jelas
+  dan awal jawaban AI dicatat di log.
+- Batas jawaban persiapan interview dinaikkan ke 6000 token supaya tidak terpotong.
+
+Diuji 13 pengecekan, termasuk mereproduksi error yang sama (`Expecting value`) dari JSON dengan koma berlebih.
+
+
 ## 2026-11-09 (lanjutan): 6 fitur perlindungan & produktivitas
 
 - **🚨 Deteksi loker penipuan** (`job_rules.scam_signals` + field `tanda_penipuan` dari AI): biaya rekrutmen,
