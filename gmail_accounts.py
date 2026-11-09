@@ -6,11 +6,12 @@ Sumbernya dua:
     bisa ditambah, diganti app password-nya, dan dihapus dari Telegram.
 """
 import imaplib
-import json
 import os
 import smtplib
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import storage
 
 MAX_ENV_ACCOUNTS = 20
 STORE = Path("data") / "gmail_accounts.json"
@@ -35,18 +36,11 @@ def _env_accounts() -> list[Account]:
 
 
 def _read_store() -> list[dict]:
-    if not STORE.exists():
-        return []
-    return json.loads(STORE.read_text(encoding="utf-8"))
+    return storage.read_json(STORE, [])
 
 
 def _write_store(items: list[dict]) -> None:
-    STORE.parent.mkdir(exist_ok=True)
-    STORE.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
-    try:
-        os.chmod(STORE, 0o600)  # berisi app password: hanya bisa dibaca pemilik file
-    except OSError:
-        pass
+    storage.write_json(STORE, items, private=True)  # berisi app password
 
 
 def load() -> list[Account]:

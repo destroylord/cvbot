@@ -100,6 +100,41 @@ class _ModelUnavailable(Exception):
         self.status = status
 
 
+def _json_chunks(resp: requests.Response) -> list[dict]:
+    """Isi jawaban server sebagai daftar objek JSON.
+
+    Biasanya satu objek, tapi sebagian server/proxy menjawab dalam bentuk streaming walau tidak diminta:
+    SSE ("data: {...}"), NDJSON (satu JSON per baris), array JSON, atau beberapa objek yang menempel.
+    """
+    try:
+        data = resp.json()
+        return [c for c in data if isinstance(c, dict)] if isinstance(data, list) else [data]
+    except ValueError:
+        pass
+    lines = []
+    for line in resp.text.splitlines():
+        line = line.strip()
+        if line.startswith("data:"):
+            line = line[5:].strip()
+        if not line or line == "[DONE]" or line.startswith((":", "event:", "id:", "retry:")):
+            continue
+        lines.append(line)
+    text, decoder, chunks, i = "\n".join(lines), json.JSONDecoder(), [], 0
+    while i < len(text):
+        if text[i] in " \t\r\n,[]":
+            i += 1
+            continue
+        try:
+            value, i = decoder.raw_decode(text, i)
+        except json.JSONDecodeError:
+            break
+        chunks += [c for c in value if isinstance(c, dict)] if isinstance(value, list) else [value]
+    if not chunks:
+        raise RuntimeError(f"Jawaban server tidak bisa dibaca (bukan JSON): {resp.text[:150]}")
+    log.info("jawaban server berisi %d potongan JSON (streaming), digabung", len(chunks))
+    return chunks
+
+
 def _error_detail(resp: requests.Response) -> str:
     """Pesan error asli dari server (Gemini & OpenAI-compatible sama-sama memakai {"error": {"message": ...}})."""
     try:
@@ -192,11 +227,15 @@ def _gemini_request(model: str, body: dict) -> str:
     resp = _post_with_retry(url, headers, body, retry_429=False)
     if not resp.ok:
         raise RuntimeError(f"Gemini error {resp.status_code}: {_error_detail(resp)}")
-    candidates = resp.json().get("candidates") or []
-    if not candidates:
+    texts, answered = [], False
+    for chunk in _json_chunks(resp):
+        for candidate in (chunk.get("candidates") or [])[:1]:
+            answered = True
+            parts = (candidate.get("content") or {}).get("parts") or []
+            texts += [p.get("text", "") for p in parts if not p.get("thought")]
+    if not answered:
         raise RuntimeError("Gemini tidak memberi jawaban (mungkin terkena filter). Coba lagi.")
-    parts = candidates[0].get("content", {}).get("parts") or []
-    return "".join(p.get("text", "") for p in parts if not p.get("thought"))
+    return "".join(texts)
 
 
 # ---------------------------------------------------------------- OpenAI-compatible
@@ -224,13 +263,18 @@ def _openai_request(model: str, messages: list, max_tokens: int) -> str:
         raise RuntimeError(f"API key ditolak oleh {base}. {SETUP_HINT}")
     if not resp.ok:
         raise RuntimeError(f"AI error {resp.status_code} dari {base}: {_error_detail(resp)}")
-    choices = resp.json().get("choices") or []
-    if not choices:
+    texts, answered = [], False
+    for chunk in _json_chunks(resp):
+        for choice in (chunk.get("choices") or [])[:1]:
+            answered = True
+            # Jawaban biasa ada di "message", jawaban streaming di "delta"
+            content = (choice.get("message") or choice.get("delta") or {}).get("content") or ""
+            if isinstance(content, list):  # sebagian server mengembalikan potongan-potongan teks
+                content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+            texts.append(content)
+    if not answered:
         raise RuntimeError("AI tidak memberi jawaban. Coba lagi atau pilih model lain.")
-    content = (choices[0].get("message") or {}).get("content") or ""
-    if isinstance(content, list):  # sebagian server mengembalikan potongan-potongan teks
-        content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
-    return content
+    return "".join(texts)
 
 
 # ---------------------------------------------------------------- Ollama
@@ -254,7 +298,7 @@ def _ask_ollama(system: str, prompt: str, image: tuple[bytes, str] | None = None
     )
     if not resp.ok:
         raise RuntimeError(f"Ollama error {resp.status_code}: {resp.text[:300]}")
-    return resp.json()["message"]["content"]
+    return "".join((chunk.get("message") or {}).get("content") or "" for chunk in _json_chunks(resp))
 
 
 # ---------------------------------------------------------------- Claude
@@ -361,7 +405,7 @@ def list_models(name: str, api_key: str | None = None) -> list[str]:
             raise RuntimeError("API key Gemini tidak valid.")
         if not resp.ok:
             raise RuntimeError(f"Gemini error {resp.status_code}: {_error_detail(resp)}")
-        names = {m["name"].removeprefix("models/") for m in resp.json().get("models") or []
+        names = {m["name"].removeprefix("models/") for m in _json_chunks(resp)[0].get("models") or []
                  if "generateContent" in (m.get("supportedGenerationMethods") or [])}
         return sorted((n for n in names if n.startswith("gemini") and not any(x in n for x in NON_TEXT_MODELS)),
                       reverse=True)
@@ -377,7 +421,7 @@ def list_models(name: str, api_key: str | None = None) -> list[str]:
         if not resp.ok:
             raise NoModelList(f"{base} tidak menyediakan daftar model (HTTP {resp.status_code}). "
                               "Ketik nama model secara manual.")
-        ids = {m.get("id") for m in resp.json().get("data") or [] if m.get("id")}
+        ids = {m.get("id") for m in _json_chunks(resp)[0].get("data") or [] if m.get("id")}
         # Model gratis (OpenRouter memberi akhiran ":free") ditaruh paling atas
         return sorted(ids, key=lambda m: (not m.endswith(":free"), m))
     if name == "claude":
@@ -389,7 +433,7 @@ def list_models(name: str, api_key: str | None = None) -> list[str]:
             resp = requests.get(f"{base}/api/tags", timeout=10)
         except requests.RequestException as e:
             raise RuntimeError(f"Ollama tidak bisa dihubungi di {base}. Pastikan Ollama jalan.") from e
-        return sorted(m["name"] for m in resp.json().get("models") or [])
+        return sorted(m["name"] for m in _json_chunks(resp)[0].get("models") or [])
     raise ValueError(f"Provider tidak dikenal: {name}")
 
 

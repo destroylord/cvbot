@@ -3,7 +3,6 @@ cover letter, dan kirim lamaran via Gmail (semi-otomatis: selalu minta konfirmas
 import asyncio
 import datetime as dt
 import hashlib
-import json
 import logging
 import os
 import re
@@ -36,6 +35,7 @@ import gmail_replies  # noqa: E402
 import job_alerts  # noqa: E402
 import job_fetcher  # noqa: E402
 import mailer  # noqa: E402
+import storage  # noqa: E402
 import tracker  # noqa: E402
 
 DATA_DIR = Path("data")
@@ -87,15 +87,13 @@ URL_RE = re.compile(r"https?://\S+")
 
 # ================================================================ util
 def load_user(uid: int) -> dict:
-    p = DATA_DIR / f"{uid}.json"
-    data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    data = storage.read_json(DATA_DIR / f"{uid}.json", {})
     tracker.migrate(data, TIMEZONE)
     return data
 
 
 def save_user(uid: int, data: dict) -> None:
-    (DATA_DIR / f"{uid}.json").write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    storage.write_json(DATA_DIR / f"{uid}.json", data)
 
 
 def update_user(uid: int, fn):
@@ -1235,6 +1233,7 @@ async def btn_ai(query, context, uid, data, arg):
             answer = await asyncio.to_thread(ai_helper.ping)
             note = f"✅ AI menjawab dalam {time.monotonic() - started:.1f} detik: \"{answer[:40]}\"\n\n"
         except Exception as e:
+            log.exception("tes AI gagal (%s · %s)", ai_helper.provider(), ai_helper.current_model())
             note = f"❌ Tes gagal: {e}\n\n"
         await safe_edit(query.message, *ai_view(note))
         return

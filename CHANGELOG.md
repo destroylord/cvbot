@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-11-09 (lanjutan): perbaikan "Tes gagal: Extra data: line 1 column ..."
+
+Error ini muncul karena ada data berisi satu objek JSON yang valid lalu diikuti data lain di belakangnya.
+Ada dua kemungkinan sumber, dan keduanya diperbaiki:
+
+- **Jawaban server AI berbentuk streaming** (beberapa potong JSON yang menempel, SSE `data: {...}`, NDJSON,
+  atau array JSON), padahal bot mengira satu JSON utuh. Sekarang semua bentuk itu dibaca dan teksnya digabung,
+  untuk Gemini, OpenAI-compatible, dan Ollama, termasuk daftar model. Jawaban yang sama sekali bukan JSON
+  (misalnya halaman error HTML dari proxy) diberi pesan jelas beserta cuplikannya.
+- **File di `data/` tertimpa sebagian** (misalnya kalau dua proses bot sempat jalan bersamaan). Modul baru
+  `storage.py` menulis secara atomik (file sementara lalu `os.replace`) untuk `settings.json`,
+  `gmail_accounts.json`, dan data pengguna. File yang terlanjur rusak dipulihkan dari objek JSON pertama
+  yang utuh, dan salinan aslinya disimpan sebagai `<nama>.rusak`.
+- Kalau 🧪 Tes AI gagal, error lengkapnya sekarang dicatat di log (`./bot.sh log`), termasuk provider dan
+  model yang dipakai.
+
+Diuji 15 pengecekan, diawali dengan mereproduksi error aslinya (`Extra data: line 1 column 29xx`) memakai
+objek `requests.Response` asli. Ditambah uji bot start dan simpan/baca data pengguna lewat `storage.py`.
+
+
 ## 2026-11-09 (lanjutan): alasan Gemini gagal ditampilkan jelas
 
 Sebelumnya, log dan pesan bot menyebut "tidak tersedia" untuk semua jenis kegagalan (server sibuk, kuota habis,
