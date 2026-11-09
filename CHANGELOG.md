@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-11-09 (lanjutan): tes otomatis & bot.py dipecah per fitur
+
+- **Tes otomatis** (`tests/`, 109 tes, `pytest`): modul murni (aturan lowongan, ubah profil, AI & perbaikan JSON,
+  penyimpanan, akun Gmail, CV & font, job alert) dan alur bot lewat pintu masuk Telegram (lowongan, penyesuaian
+  CV, kirim & antrean, menu, lamaran, interview, rekomendasi harian, backup, startup). Tanpa internet: AI, Gmail,
+  dan font palsu. `requirements-dev.txt` untuk pytest & pyflakes.
+- **`bot.py` dipecah** dari 2.876 baris menjadi 13 modul: `core.py` (bagian bersama), `fitur_*.py` (lowongan,
+  penyesuaian, kirim, lamaran, rekomendasi, interview, backup), `menu_*.py` (CV Saya, pengaturan, AI, akun).
+  `bot.py` (216 baris) tinggal pintu masuk: perintah, peta tombol `BUTTONS` yang dikelompokkan per fitur, urutan
+  isian teks `TEXT_FORMS`, pembagi file, dan `main()`.
+- Pemindahan memakai skrip berbasis AST supaya tidak ada fungsi yang tertinggal. Referensi antar fitur ditulis
+  `modul.fungsi` (tanpa import melingkar saat start). Setiap modul diuji bisa di-import sendiri.
+- **Tidak ada perubahan perilaku**: 109 tes yang sama lulus sebelum dan sesudah pemecahan. Cara menjalankan bot
+  tidak berubah (`python bot.py` / `./bot.sh`).
+- README: bagian Struktur kode dan Menjalankan tes.
+
+
 ## 2026-11-09 (lanjutan): perbaikan "Gagal menyiapkan interview: Expecting value: line ... column ..."
 
 Penyebab: AI sesekali mengembalikan JSON yang tidak valid, paling sering ada koma berlebih sebelum `]` atau `}`,

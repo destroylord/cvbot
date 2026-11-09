@@ -375,6 +375,42 @@ Isi **⚙️ Pengaturan**:
   dan permintaan info dari HR. Penolakan dan konfirmasi otomatis masuk tanpa suara.
 - Pesan "⏳ ..." otomatis diganti hasilnya atau dihapus setelah selesai.
 
+## Struktur kode
+
+| File | Isi |
+| --- | --- |
+| `bot.py` | Pintu masuk: daftar perintah, peta tombol, pembagi pesan teks & file, `main()` |
+| `core.py` | Konfigurasi `.env`, log, data pengguna, alat bantu Telegram, layanan bersama |
+| `fitur_lowongan.py` | Lowongan masuk (teks, link, foto): analisis, ringkasan, peringatan |
+| `fitur_penyesuaian.py` | Penyesuaian CV: metode PAR, pratinjau skor, 🚀 Tingkatkan lagi |
+| `fitur_kirim.py` | Email lamaran, konfirmasi, kirim, jadwal jam kerja, batas harian, antrean |
+| `fitur_lamaran.py` | 📂 Lamaran, status, balasan HR, follow-up, statistik |
+| `fitur_rekomendasi.py` | Rekomendasi dari job alert, cek otomatis harian |
+| `fitur_interview.py` | 🎤 Persiapan & latihan interview |
+| `fitur_backup.py` | 💾 Backup & pulihkan |
+| `menu_cv.py` | 📄 CV Saya, unggah CV, ✨ Perbaiki poin dengan PAR |
+| `menu_pengaturan.py` | ⚙️ Pengaturan, gaya email, 🔤 font CV, 🎯 preferensi |
+| `menu_ai.py`, `menu_akun.py` | 🤖 Model AI, 📧 Akun Gmail |
+| `ai_helper.py` | Semua pemanggilan AI (Gemini, OpenAI-compatible, Claude, Ollama) dan prompt-nya |
+| `job_rules.py`, `profile_edit.py`, `tracker.py` | Aturan murni tanpa Telegram: penipuan, preferensi, dobel, jam kerja; ubah profil; status lamaran |
+| `cv_parser.py`, `cv_builder.py`, `cv_fonts.py` | Baca CV, buat PDF CV, font |
+| `job_alerts.py`, `gmail_replies.py`, `mailer.py`, `gmail_accounts.py` | Gmail: job alert, balasan HR, kirim, akun |
+| `job_fetcher.py`, `storage.py`, `app_settings.py` | Buka link lowongan, simpan JSON aman, pengaturan dari bot |
+
+Menambah tombol baru: buat fungsi `btn_*(query, context, uid, data, arg)` di modul fiturnya, lalu daftarkan di
+`BUTTONS` (`bot.py`). Menambah isian teks: daftarkan di `TEXT_FORMS`.
+
+## Menjalankan tes
+
+```
+pip install -r requirements-dev.txt
+pytest
+```
+
+Tes tidak butuh internet, token Telegram, akun Gmail, maupun API key: AI, Gmail, dan font diganti versi palsu,
+dan data disimpan di folder sementara. Tes alur bot memakai pintu masuk yang sama dengan Telegram (tombol, teks,
+file, perintah, jadwal). Jalankan `pytest` setiap selesai mengubah kode.
+
 ## Catatan
 
 - Isi `ALLOWED_USER_IDS`, kalau tidak siapa pun yang menemukan bot kamu bisa memakai Gmail kamu.

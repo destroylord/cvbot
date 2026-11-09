@@ -1,10 +1,7 @@
 """Penyimpanan, akun Gmail, CV (baca/tulis/font), dan pembacaan email job alert."""
-import datetime as dt
 import json
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from pathlib import Path
-
 import pytest
 
 import cv_builder

@@ -84,7 +84,7 @@ def test_antrean_batal_dan_gagal_kirim(ready, gmail, monkeypatch):
     ready.press("send")
     ready.press("confirm:0:later")
     qid = ready.data()["antrian"][0]["id"]
-    assert f"🕗 Antrean kirim (1)|q:list" in ready.buttons(ready.press("lamlist"))
+    assert "🕗 Antrean kirim (1)|q:list" in ready.buttons(ready.press("lamlist"))
 
     def down(*a, **k):
         raise RuntimeError("SMTP down")
