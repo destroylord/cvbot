@@ -1,5 +1,41 @@
 # Changelog
 
+## 2026-11-09 (lanjutan): metode PAR, font CV, email lamaran yang wajar
+
+### Metode PAR + tanya hasil ke pengguna
+- Poin pengalaman dan proyek ditulis dengan metode **PAR** (Problem → Action → Result).
+- Hasil hanya dari CV asli atau dari jawaban pengguna. Kalau poin penting belum punya hasil, AI menandainya
+  (`perlu_hasil`) dan bot **bertanya dulu** (maksimal 5), dengan tombol **⏭️ Lewati** dan **✅ Cukup, buat CV**.
+  Setelah dijawab, CV disusun ulang dengan hasil tersebut.
+- Jawaban disimpan (`hasil_poin`) dan dipakai lagi untuk lowongan berikutnya. Poin yang dilewati diingat
+  (`hasil_dilewati`), jadi tidak ditanya ulang. Teks poin dari AI yang sedikit berbeda dicocokkan ke poin asli.
+- `guard_profile` tetap membuang skill, perusahaan, dan proyek karangan.
+
+### Font CV
+- Modul baru `cv_fonts.py`. Font diambil dari Google Fonts (TTF statis, sekali unduh ke `data/fonts/`).
+- Default: **font CV asli**, dideteksi saat CV diunggah (`cv_parser.detect_font`). Untuk PDF dipilih font yang
+  paling banyak dipakai karakternya (font isi, bukan judul). Untuk DOCX dicek font per teks, lalu gaya Normal,
+  lalu font tema dokumen.
+- Font Microsoft diganti padanannya yang ukurannya identik (Calibri → Carlito, Arial → Arimo, Times New Roman →
+  Tinos, Cambria → Caladea, Georgia → Gelasio). Font Canva/Google dipakai apa adanya.
+- **⚙️ Pengaturan > 🔤 Font CV**: 11 font umum + Helvetica, atau ketik nama font Google Fonts mana pun
+  (dicek dulu ke Google Fonts). Gagal unduh berarti pakai Helvetica, dan caption PDF memberi tahu.
+- Karakter yang tidak ada di font dibuang (bukan kotak kosong). Kutip miring dan karakter non-Latin yang
+  didukung font sekarang tetap tampil.
+
+### Email lamaran
+- "Cover letter" diganti **email lamaran** yang wajar dan **tidak mengulang isi CV**, mengikuti contoh dari
+  pengguna: salam, perkenalan (nama, posisi, perusahaan, sumber lowongan), satu kalimat keahlian yang relevan,
+  CV/portofolio terlampir, penutup siap wawancara, tanda tangan (nama, telepon, tautan).
+- Gaya: Formal 120-180 kata, Santai 90-140 kata, Singkat 50-80 kata.
+- Sumber lowongan diambil dari domain link (misalnya `loker.id`) atau rekomendasi job alert. Portofolio hanya
+  disebut kalau ada tautannya di profil. Rincian poin pengalaman tidak lagi dikirim ke prompt email.
+
+Diuji 43 pengecekan: font asli diunduh dari Google Fonts dan tertanam di PDF (Carlito, Poppins, EB Garamond,
+Raleway), deteksi font PDF/DOCX/tema, alur tanya-jawab PAR (jawab, lewati, cukup, fakta dipakai ulang, batal
+lewat menu), prompt email, dan menu font. Tampilan PDF dicek langsung.
+
+
 ## 2026-11-09 (lanjutan): perbaikan "Tes gagal: Extra data: line 1 column ..."
 
 Error ini muncul karena ada data berisi satu objek JSON yang valid lalu diikuti data lain di belakangnya.

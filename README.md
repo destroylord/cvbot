@@ -1,7 +1,7 @@
 # CV Bot Telegram
 
 Bot Telegram untuk scan CV, cari rekomendasi lowongan dari email job alert, menyesuaikan CV
-per lowongan (tetap jujur), membuat cover letter, lalu kirim lamaran via Gmail
+per lowongan dengan metode PAR (tetap jujur), membuat email lamaran, lalu kirim lamaran via Gmail
 **setelah kamu konfirmasi**.
 
 Daftar perubahan terbaru dan cara upgrade: lihat [CHANGELOG.md](CHANGELOG.md).
@@ -14,7 +14,7 @@ Daftar perubahan terbaru dan cara upgrade: lihat [CHANGELOG.md](CHANGELOG.md).
 3. Kirim file CV (PDF/DOCX).
 4. Kirim lowongan: link, teks, foto poster, atau forward postingan dari grup lain.
    Atau tekan **🎯 Rekomendasi** untuk cari dari email job alert.
-5. Ikuti tombol yang muncul: sesuaikan CV, buat cover letter, pilih akun Gmail, kirim.
+5. Ikuti tombol yang muncul: sesuaikan CV, buat email lamaran, pilih akun Gmail, kirim.
 6. Pantau lewat **📂 Lamaran**, atur preferensi di **⚙️ Pengaturan**.
 
 ## Alur
@@ -27,9 +27,10 @@ Daftar perubahan terbaru dan cara upgrade: lihat [CHANGELOG.md](CHANGELOG.md).
    - kirim **foto/screenshot poster lowongan**. Bot membaca isinya (termasuk email HR) pakai AI.
      Lowongan dari grup/channel lain cukup di-**forward** ke bot.
 3. Bot memberi skor kecocokan. Kalau skor di bawah `CV_TAILOR_THRESHOLD` (default 70),
-   CV otomatis disesuaikan dan dikirim sebagai PDF baru, lengkap dengan skor sebelum/sesudah
-   dan daftar perubahannya. Untuk skor tinggi, ada tombol **Sesuaikan CV** kalau mau.
-4. Tekan **Buat Cover Letter**, revisi pakai `/revisi <instruksi>` kalau perlu.
+   CV otomatis disesuaikan dengan **metode PAR** dan dikirim sebagai PDF baru, lengkap dengan skor
+   sebelum/sesudah dan daftar perubahannya. Untuk skor tinggi, ada tombol **Sesuaikan CV** kalau mau.
+   Kalau ada poin penting yang belum punya hasil, bot menanyakannya dulu ke kamu (lihat di bawah).
+4. Tekan **Buat Email Lamaran**, revisi pakai `/revisi <instruksi>` kalau perlu.
 5. Tekan **Kirim via Gmail**, cek konfirmasi, tekan **Ya, kirim** (atau **Kirim dari ...**
    kalau kamu memakai beberapa akun Gmail).
    CV yang dilampirkan otomatis versi yang sudah disesuaikan (kalau ada).
@@ -41,6 +42,44 @@ Selain instruksi ke AI, ada pengaman di kode (`guard_profile`) yang otomatis mem
 perusahaan, atau proyek yang tidak ada di CV asli, serta mengembalikan nama, kontak, periode kerja,
 dan pendidikan ke data asli. Skill yang belum kamu miliki ditampilkan sebagai saran belajar,
 bukan dimasukkan ke CV. Tetap baca CV hasilnya sebelum mengirim.
+
+### Metode PAR (Problem → Action → Result)
+
+Setiap poin pengalaman dan proyek ditulis ulang sebagai satu kalimat: masalah atau kebutuhannya, apa yang
+kamu lakukan (kata kerja aktif + istilah dari lowongan), dan **hasilnya**. Contoh:
+
+> Antrean kasir sering menumpuk saat jam ramai; membangun sistem kasir berbasis Laravel sehingga waktu antre
+> turun dari 10 menit menjadi 3 menit.
+
+Hasil hanya boleh diambil dari CV asli atau dari jawaban kamu, bot **tidak mengarang angka**. Kalau poin penting
+belum punya hasil, bot bertanya dulu, maksimal 5 pertanyaan:
+
+- Ketik jawabannya, misalnya "waktu input data turun dari 2 jam jadi 15 menit".
+- **⏭️ Lewati** kalau memang tidak ada hasilnya. Poin itu tetap ditulis sebagai masalah + tindakan, dan
+  tidak ditanyakan lagi.
+- **✅ Cukup, buat CV** untuk langsung membuat CV dengan jawaban yang sudah ada.
+
+Jawaban kamu disimpan, jadi untuk lowongan berikutnya poin yang sama langsung memakai hasil itu tanpa
+ditanya ulang.
+
+### Font CV
+
+Secara default, PDF CV yang disesuaikan memakai **font yang sama dengan CV asli kamu** (dideteksi saat CV
+diunggah). Font Microsoft diganti padanannya yang ukurannya identik, karena font Microsoft tidak boleh
+disebarkan bebas: Calibri → Carlito, Arial → Arimo, Times New Roman → Tinos, Cambria → Caladea,
+Georgia → Gelasio. Font dari template Canva (Poppins, Montserrat, Lato, Open Sans, dll.) dipakai apa adanya.
+
+Ganti lewat **⚙️ Pengaturan > 🔤 Font CV**: pilih dari daftar font yang umum dipakai pelamar, atau ketik nama
+font apa pun dari [Google Fonts](https://fonts.google.com). Font diunduh sekali dari Google Fonts lalu disimpan
+di `data/fonts/`. Kalau VPS tidak bisa mengunduhnya, PDF memakai Helvetica.
+
+### Email lamaran
+
+Karena CV sudah dilampirkan, isi email **tidak mengulang isi CV**: salam, perkenalan singkat (nama, posisi,
+perusahaan, dan sumber lowongan kalau diketahui), satu kalimat latar belakang dengan 2-4 keahlian yang
+relevan, CV (dan portofolio kalau ada tautannya) terlampir, penutup siap wawancara, lalu tanda tangan
+dengan nama, nomor telepon, dan tautan portofolio. Gayanya bisa dipilih di **⚙️ Pengaturan > ✍️ Gaya email
+lamaran**: 🎩 Formal (120-180 kata), 😊 Santai (90-140 kata), atau ⚡ Singkat (50-80 kata).
 
 ## Setup
 
@@ -183,8 +222,8 @@ Saat kamu mengirim atau mem-forward foto poster lowongan:
    dan berhenti di sini.
 3. **AI mencocokkan** lowongan dengan CV kamu: skor, skill yang cocok dan yang kurang, dan email HR.
 4. Kalau skor di bawah `CV_TAILOR_THRESHOLD`, CV otomatis disesuaikan dan PDF baru dikirim untuk kamu cek.
-   Kalau skornya tinggi, kamu pilih **Buat Cover Letter**, **Sesuaikan CV**, atau **Lewati**.
-5. **Buat Cover Letter**, revisi dengan `/revisi` kalau perlu, lalu **📧 Kirim via Gmail**.
+   Kalau skornya tinggi, kamu pilih **Buat Email Lamaran**, **Sesuaikan CV**, atau **Lewati**.
+5. **Buat Email Lamaran**, revisi dengan `/revisi` kalau perlu, lalu **📧 Kirim via Gmail**.
 6. **Layar konfirmasi**: tujuan (email HR dari gambar), subjek, lampiran CV, lalu kamu pilih akun
    pengirimnya. Kalau email di gambar tidak terbaca, bot menanyakannya. Kalau terbaca tapi salah,
    tekan **✏️ Ganti email tujuan**.
@@ -205,14 +244,15 @@ di samping kolom chat, jadi tidak perlu hafal perintahnya.
 - `/lamaran` - daftar lamaran, ubah status, buat follow-up
 - `/statistik` - statistik lamaran (tingkat respons, interview, per minggu)
 - `/cekbalasan` - cek balasan HR di Gmail sekarang
-- `/pengaturan` (atau `/config`) - model AI, gaya cover letter, akun Gmail, nyala/matikan cek otomatis
-- `/gaya` - atur gaya cover letter (formal, santai, singkat)
+- `/pengaturan` (atau `/config`) - model AI, gaya email lamaran, font CV, akun Gmail, nyala/matikan cek otomatis
+- `/gaya` - atur gaya email lamaran (formal, santai, singkat)
 - `/profil` - lihat hasil scan CV
-- `/revisi <instruksi>` - revisi cover letter atau email follow-up terakhir
+- `/revisi <instruksi>` - revisi email lamaran atau email follow-up terakhir
 
 Isi **⚙️ Pengaturan**:
 
-- **Gaya cover letter**: formal, santai, atau singkat
+- **✍️ Gaya email lamaran**: formal, santai, atau singkat
+- **🔤 Font CV**: sama seperti CV asli (default), pilih dari daftar, atau font Google Fonts lain
 - **📧 Akun Gmail**: tambah, ganti app password, hapus, dan pilih akun default (⭐)
 - **Rekomendasi harian** dan **Cek balasan otomatis**: ON/OFF
 

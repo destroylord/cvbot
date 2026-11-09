@@ -523,22 +523,43 @@ ISI EMAIL:
 
 
 # ---------------------------------------------------------------- tailoring CV
-def tailor_cv(profile: dict, job_text: str, lang: str | None) -> dict:
+def tailor_cv(profile: dict, job_text: str, lang: str | None, facts: list[dict] | None = None,
+              ask_missing: bool = True) -> dict:
+    """Sesuaikan CV dengan lowongan memakai metode PAR (Problem -> Action -> Result).
+
+    facts: hasil nyata yang sudah dikonfirmasi kandidat, [{"poin": <poin asli>, "hasil": <jawaban>}].
+    ask_missing: minta daftar poin penting yang belum punya hasil (perlu_hasil) untuk ditanyakan ke kandidat.
+    """
     language = "Bahasa Inggris" if lang == "en" else "Bahasa Indonesia"
     system = ("Kamu adalah penulis CV profesional yang SANGAT JUJUR. Kamu hanya boleh memakai "
-              "fakta yang ada di CV asli. " + JSON_ONLY)
+              "fakta yang ada di CV asli dan hasil yang dikonfirmasi kandidat. " + JSON_ONLY)
+    facts_text = "\n".join(f'- Poin: "{f["poin"]}" -> Hasil: {f["hasil"]}' for f in facts or []) or "(belum ada)"
+    missing_rule = (
+        "\n- Kalau sebuah poin penting untuk lowongan ini tidak punya hasil di CV asli maupun di HASIL DARI "
+        "KANDIDAT,\n  tulis poin itu sebagai Problem + Action saja (JANGAN mengarang hasil), lalu masukkan ke "
+        "perlu_hasil:\n  salin poin aslinya persis, dan tulis satu pertanyaan singkat bahasa Indonesia untuk "
+        "kandidat tentang\n  hasil/dampaknya (contoh: \"Setelah sistem ini dipakai, apa yang berubah? Ada angka "
+        "waktu, jumlah pengguna,\n  atau penghematan?\"). Maksimal 5 poin, pilih yang paling relevan dengan "
+        "lowongan." if ask_missing else "")
     prompt = f"""Sesuaikan CV kandidat untuk lowongan di bawah supaya lebih relevan dan ramah ATS.
+
+METODE PAR untuk setiap poin pengalaman dan proyek, ditulis sebagai satu kalimat ringkas:
+- Problem: masalah atau kebutuhan yang dihadapi (singkat, sebagai konteks)
+- Action: apa yang kandidat lakukan, diawali kata kerja aktif, pakai istilah dari lowongan
+- Result: hasil atau dampaknya, sebisa mungkin terukur
+- Hasil HANYA boleh diambil dari CV asli atau dari HASIL DARI KANDIDAT di bawah. JANGAN mengarang angka,
+  persentase, atau dampak.{missing_rule}
 
 BOLEH:
 - menulis ulang ringkasan khusus untuk posisi ini
 - mengurutkan ulang skill, pengalaman, dan poin supaya yang paling relevan ada di atas
-- menulis ulang poin pengalaman dengan kata kerja aktif dan istilah dari lowongan,
-  SELAMA maknanya sama persis dengan poin aslinya
+- menulis ulang poin dengan metode PAR, SELAMA faktanya sama dengan poin asli + hasil dari kandidat
 - menghapus poin yang tidak relevan (setiap pengalaman tetap minimal 1 poin)
 - menerjemahkan jabatan dan poin ke {language}
 
 DILARANG:
 - menambah skill, tools, sertifikasi, pengalaman, proyek, angka, atau pencapaian yang tidak ada di CV asli
+  maupun di HASIL DARI KANDIDAT
 - mengubah nama perusahaan, periode, atau pendidikan
 - mengubah atau menerjemahkan nama skill (salin persis dari CV asli)
 
@@ -547,14 +568,21 @@ Tulis isi CV dalam {language}.
 Balas JSON:
 {{"profile": <objek dengan skema yang sama persis dengan profil asli>,
 "perubahan": [3-6 poin singkat bahasa Indonesia tentang apa yang kamu ubah],
-"saran_belajar": [skill penting dari lowongan yang BELUM dimiliki kandidat]}}
+"saran_belajar": [skill penting dari lowongan yang BELUM dimiliki kandidat],
+"perlu_hasil": [{{"poin_asli": "...", "pertanyaan": "..."}}]}}
 
 PROFIL ASLI:
 {json.dumps(profile, ensure_ascii=False)}
 
+HASIL DARI KANDIDAT (sudah dikonfirmasi kandidat, boleh dipakai sebagai Result):
+{facts_text}
+
 LOWONGAN:
 {job_text[:7000]}"""
-    return _parse_json(_ask(system, prompt, max_tokens=4000))
+    result = _parse_json(_ask(system, prompt, max_tokens=6000))
+    if not ask_missing:
+        result["perlu_hasil"] = []
+    return result
 
 
 def _norm(value) -> str:
@@ -596,35 +624,74 @@ def guard_profile(original: dict, tailored: dict) -> dict:
 
 # ---------------------------------------------------------------- cover letter
 GAYA = {
-    "formal": "Nada formal, sopan, dan profesional. Panjang 250-300 kata.",
-    "santai": "Nada profesional tapi hangat dan luwes (tidak kaku), tetap sopan. Panjang 200-250 kata.",
-    "singkat": "Singkat dan padat, langsung ke poin. Maksimal 150 kata.",
+    "formal": "Formal, sopan, dan profesional. 120-180 kata.",
+    "santai": "Profesional tapi hangat dan luwes, tidak kaku, tetap sopan. 90-140 kata.",
+    "singkat": "Singkat dan langsung ke inti, 2-3 kalimat isi. 50-80 kata.",
 }
+
+# Contoh struktur email lamaran formal (dari pengguna). Hanya acuan gaya, isinya tidak boleh disalin.
+EMAIL_EXAMPLE = """Yth. HRD Manager,
+
+Saya berharap email ini ditemukan dalam keadaan baik.
+
+Perkenalkan nama saya <Nama> dan saya ingin menyampaikan minat saya untuk melamar posisi <Posisi> di perusahaan <Perusahaan>, sebagaimana diinformasikan di <sumber lowongan>. Dengan latar belakang saya di bidang <bidang> serta pengalaman dalam <2-4 keahlian paling relevan>, saya yakin dapat memberikan kontribusi yang berarti bagi tim.
+
+Saya telah melampirkan CV dan portofolio saya untuk pertimbangan lebih lanjut. Saya sangat berharap dapat membawa pengalaman dan keahlian saya ke <Perusahaan> dan akan sangat senang untuk mendiskusikan bagaimana saya dapat berkontribusi bagi tim.
+
+Terima kasih atas perhatian Anda terhadap lamaran saya. Saya sangat menantikan kesempatan untuk bisa bekerja sama dan siap untuk melakukan wawancara kapan saja sesuai kenyamanan Anda.
+
+Hormat saya,
+
+<Nama>
+<Nomor telepon>
+<Tautan portofolio / LinkedIn>"""
 
 
 def write_cover_letter(profile: dict, job: dict, job_text: str, gaya: str = "formal") -> str:
-    lang = "Bahasa Indonesia" if job.get("bahasa_lowongan") == "id" else "English"
+    """Isi email lamaran. CV sudah dilampirkan, jadi isinya singkat dan tidak mengulang isi CV."""
+    lang = "Bahasa Indonesia" if job.get("bahasa_lowongan") != "en" else "English"
     system = (
-        "Kamu menulis cover letter yang personal, spesifik, dan jujur. "
-        "Jangan mengarang pengalaman atau skill yang tidak ada di profil. "
+        "Kamu menulis isi email lamaran kerja yang wajar, sopan, dan jujur, seperti yang biasa dikirim pelamar. "
         "Tulis dalam teks biasa tanpa markdown, siap dikirim sebagai isi email."
     )
-    prompt = f"""Tulis cover letter dalam {lang} untuk posisi {job.get('posisi')} di {job.get('perusahaan')}.
+    source = job.get("sumber_info")
+    prompt = f"""Tulis isi email lamaran dalam {lang} untuk posisi {job.get('posisi')} di {job.get('perusahaan')}.
 
 Gaya: {GAYA.get(gaya, GAYA['formal'])}
 
-Aturan:
-- Buka langsung dengan alasan tertarik + nilai yang dibawa kandidat (hindari pembuka klise).
-- Sebutkan 2-3 pengalaman/skill paling relevan dengan lowongan, pakai angka jika ada di profil.
-- Tutup dengan ajakan interview yang sopan, lalu tanda tangan dengan nama & kontak kandidat.
-- Jangan pakai placeholder seperti [Nama Perusahaan].
+PENTING: CV sudah dilampirkan di email, jadi JANGAN mengulang isi CV. Jangan merinci pengalaman kerja,
+proyek, angka, pencapaian, atau daftar skill panjang. Cukup satu kalimat latar belakang yang menyebut
+bidang kandidat dan 2-4 keahlian paling relevan dengan lowongan.
 
-PROFIL:
-{json.dumps(profile, ensure_ascii=False)}
+Struktur:
+1. Salam pembuka (misalnya "Yth. HRD Manager," atau "Yth. Tim Rekrutmen {job.get('perusahaan') or ''},").
+2. Perkenalan singkat: nama, posisi yang dilamar, perusahaan{', dan sumber lowongan: ' + source if source else ''}.
+3. Satu kalimat latar belakang + keahlian yang relevan.
+4. Menyebut CV terlampir{' dan portofolio' if profile.get('tautan') else ''} untuk pertimbangan.
+5. Penutup: terima kasih dan siap untuk wawancara.
+6. Tanda tangan: nama, nomor telepon, dan satu tautan portofolio/LinkedIn kalau ada di profil.
+
+Contoh email formal yang disukai kandidat (acuan gaya dan struktur saja; JANGAN salin nama, perusahaan,
+tautan, atau keahlian dari contoh ini, pakai data kandidat dan lowongan yang sebenarnya):
+{EMAIL_EXAMPLE}
+
+Aturan:
+- Jangan pakai placeholder seperti <Nama> atau [Perusahaan]. Kalau sebuah info tidak diketahui
+  (misalnya sumber lowongan), hilangkan saja bagian itu.
+- Jangan mengarang pengalaman atau keahlian yang tidak ada di profil.{'' if profile.get('tautan') else '''
+- Kandidat tidak punya tautan portofolio, jadi JANGAN menyebut portofolio (cukup CV terlampir).'''}
+
+PROFIL KANDIDAT:
+nama: {profile.get('nama')}
+telepon: {profile.get('telepon')}
+tautan: {json.dumps(profile.get('tautan') or [], ensure_ascii=False)}
+ringkasan: {profile.get('ringkasan')}
+skill: {', '.join(profile.get('skill') or [])}
+posisi terakhir: {json.dumps([{'posisi': e.get('posisi'), 'perusahaan': e.get('perusahaan')} for e in (profile.get('pengalaman') or [])[:3] if isinstance(e, dict)], ensure_ascii=False)}
 
 LOWONGAN:
-{job_text[:6000]}"""
-    return _ask(system, prompt, max_tokens=1500)
+{job_text[:4000]}"""
+    return _ask(system, prompt, max_tokens=1200)
 
 
 def revise_text(text: str, instruction: str, kind: str = "cover letter") -> str:

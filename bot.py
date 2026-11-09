@@ -1,16 +1,18 @@
 """Bot Telegram: scan CV, rekomendasi lowongan dari Gmail job alert, CV tailoring,
-cover letter, dan kirim lamaran via Gmail (semi-otomatis: selalu minta konfirmasi)."""
+email lamaran, dan kirim lamaran via Gmail (semi-otomatis: selalu minta konfirmasi)."""
 import asyncio
 import datetime as dt
 import hashlib
 import logging
 import os
+import difflib
 import re
 import sys
 import time
 from functools import wraps
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -29,6 +31,7 @@ from telegram.ext import (  # noqa: E402
 import ai_helper  # noqa: E402
 import app_settings  # noqa: E402
 import cv_builder  # noqa: E402
+import cv_fonts  # noqa: E402
 import cv_parser  # noqa: E402
 import gmail_accounts  # noqa: E402
 import gmail_replies  # noqa: E402
@@ -73,8 +76,8 @@ COMMANDS = [
     ("cekbalasan", "Cek balasan HR di Gmail sekarang"),
     ("statistik", "Statistik lamaran"),
     ("profil", "Lihat hasil scan CV"),
-    ("pengaturan", "Gaya cover letter, akun Gmail, notifikasi"),
-    ("revisi", "Revisi cover letter / follow-up terakhir"),
+    ("pengaturan", "Model AI, gaya email, font CV, akun Gmail, notifikasi"),
+    ("revisi", "Revisi email lamaran / follow-up terakhir"),
     ("start", "Cara pakai & tampilkan menu"),
 ]
 
@@ -191,9 +194,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "2. Kirim link / teks / foto poster lowongan (bisa di-forward dari grup lain), "
         "atau tekan 🎯 Rekomendasi untuk cari dari email job alert\n"
         f"3. Kalau skornya di bawah {TAILOR_THRESHOLD}, CV otomatis disesuaikan (tetap jujur)\n"
-        "4. Buat cover letter, review, lalu kirim via Gmail dengan satu klik\n\n"
+        "4. Buat email lamaran, review, lalu kirim via Gmail dengan satu klik\n\n"
         "Pakai tombol menu di bawah, atau tombol Menu di samping kolom chat untuk daftar perintah. "
-        "Revisi cover letter: /revisi <instruksi>\n\n"
+        "Revisi email lamaran: /revisi <instruksi>\n\n"
         f"Otomatis: rekomendasi & pengingat follow-up tiap hari jam {DAILY_CHECK_TIME}, "
         f"cek balasan HR tiap {REPLY_CHECK_MINUTES} menit (bisa dimatikan di ⚙️ Pengaturan).",
         reply_markup=main_menu())
@@ -263,10 +266,11 @@ async def statistik(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def gaya_view(data: dict):
     current = data.get("gaya", "formal")
-    return (f"Gaya cover letter sekarang: {GAYA_LABEL.get(current)}\n\n"
-            "🎩 Formal: sopan dan profesional, 250-300 kata\n"
-            "😊 Santai: profesional tapi hangat, 200-250 kata\n"
-            "⚡ Singkat: langsung ke poin, maksimal 150 kata",
+    return (f"Gaya email lamaran sekarang: {GAYA_LABEL.get(current)}\n\n"
+            "Isi email tidak mengulang isi CV (CV sudah dilampirkan).\n\n"
+            "🎩 Formal: sopan dan profesional, 120-180 kata\n"
+            "😊 Santai: hangat tapi tetap sopan, 90-140 kata\n"
+            "⚡ Singkat: langsung ke inti, 50-80 kata",
             kb([(label, f"gaya:{key}") for key, label in GAYA_LABEL.items()]))
 
 
@@ -286,13 +290,16 @@ def settings_view(data: dict):
     ai = ai_helper.PROVIDERS.get(ai_helper.provider(), {})
     text = (f"⚙️ Pengaturan\n\n"
             f"AI: {ai.get('label', ai_helper.provider()).split(' (')[0]} · {ai_helper.current_model() or '-'}\n"
-            f"Gaya cover letter: {GAYA_LABEL.get(data.get('gaya', 'formal'))}\n"
+            f"Gaya email lamaran: {GAYA_LABEL.get(data.get('gaya', 'formal'))}\n"
+            f"Font CV: {cv_fonts.label(cv_font_for(data))}"
+            f"{' (sama seperti CV asli)' if data.get('font_cv', 'auto') == 'auto' else ''}\n"
             f"Akun Gmail default: {default.address if default else 'belum ada'}"
             f"{f' ({len(accounts)} akun terhubung)' if len(accounts) > 1 else ''}\n"
             f"Rekomendasi harian jam {DAILY_CHECK_TIME}: {onoff['auto_rekomendasi']}\n"
             f"Cek balasan HR tiap {REPLY_CHECK_MINUTES} menit: {onoff['auto_balasan']}\n\n"
             f"Jam dan ambang skor diatur di file .env.")
-    rows = [[("🤖 Model AI", "ai")], [("✍️ Gaya cover letter", "set:gaya")], [("📧 Akun Gmail", "acc")]]
+    rows = [[("🤖 Model AI", "ai")], [("✍️ Gaya email lamaran", "set:gaya"), ("🔤 Font CV", "font")],
+            [("📧 Akun Gmail", "acc")]]
     rows += [[(f"{label}: {'ON ✅' if data.get(key, True) else 'OFF ⛔'}", f"set:tog:{key}")]
              for key, label in TOGGLES.items()]
     return text, kb(*rows)
@@ -317,9 +324,9 @@ async def revisi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if kind == "fu" and followup:
         current, label = followup["text"], "email follow-up"
     elif context.user_data.get("cover_letter"):
-        kind, current, label = "cl", context.user_data["cover_letter"], "cover letter"
+        kind, current, label = "cl", context.user_data["cover_letter"], "email lamaran"
     else:
-        await update.message.reply_text("Belum ada cover letter atau follow-up untuk direvisi.")
+        await update.message.reply_text("Belum ada email lamaran atau follow-up untuk direvisi.")
         return
     if not instruction:
         await update.message.reply_text("Tulis instruksinya, contoh: /revisi lebih singkat")
@@ -613,7 +620,14 @@ def followup_view(data: dict, followup: dict) -> dict:
 
 
 # ================================================================ alur utama lowongan
-async def process_job(message, context, uid: int, job_text: str):
+def source_from_link(url: str | None) -> str | None:
+    """'https://www.loker.id/abc' -> 'loker.id'"""
+    host = urlparse(url or "").netloc.lower()
+    return host.removeprefix("www.") or None
+
+
+async def process_job(message, context, uid: int, job_text: str, source: str | None = None):
+    """source: dari mana lowongan ini (misalnya loker.id), disebut di email lamaran kalau diketahui."""
     data = load_user(uid)
     profile = data.get("profile")
     if not profile:
@@ -627,6 +641,7 @@ async def process_job(message, context, uid: int, job_text: str):
         log.exception("analisis gagal")
         # Simpan teks lowongannya supaya bisa dicoba lagi tanpa kirim ulang (misalnya saat AI sedang sibuk)
         context.user_data["retry_job_text"] = job_text
+        context.user_data["retry_job_source"] = source
         await msg.edit_text(f"Gagal menganalisis lowongan: {e}", reply_markup=kb([("🔄 Coba lagi", "retryjob")]))
         return
     context.user_data["retry_job_text"] = None
@@ -635,6 +650,7 @@ async def process_job(message, context, uid: int, job_text: str):
                             "Coba copy-paste deskripsi lowongannya langsung ke sini.")
         return
 
+    job["sumber_info"] = source
     context.user_data.update({
         "job": job, "job_text": job_text, "active_profile": profile, "tailored_cv": None,
         "cover_letter": None, "recipient": None, "awaiting_email": False,
@@ -645,30 +661,150 @@ async def process_job(message, context, uid: int, job_text: str):
         await tailor_flow(message, context, uid)
     else:
         await msg.edit_text(job_summary(job), reply_markup=kb(
-            [("✍️ Buat Cover Letter", "cl"), ("🛠️ Sesuaikan CV", "tailor")],
+            [("✍️ Buat Email Lamaran", "cl"), ("🛠️ Sesuaikan CV", "tailor")],
             [("❌ Lewati", "skip")]))
 
 
+def cv_font_for(data: dict) -> str:
+    """Font PDF CV: pilihan pengguna, atau mengikuti font CV asli (default)."""
+    choice = data.get("font_cv", "auto")
+    return choice if choice != "auto" else cv_fonts.resolve(data.get("font_asli"))
+
+
+def _point_key(text: str) -> str:
+    return " ".join(str(text or "").lower().split())
+
+
+def par_questions(data: dict, original: dict, result: dict) -> list[dict]:
+    """Poin yang perlu ditanyakan hasilnya ke pengguna: belum pernah dijawab atau dilewati, maks 5."""
+    originals = {_point_key(p): p for section in ("pengalaman", "proyek")
+                 for item in original.get(section) or [] if isinstance(item, dict)
+                 for p in (item.get("poin") or []) if isinstance(p, str)}
+    known = {_point_key(f.get("poin")) for f in data.get("hasil_poin") or []}
+    known |= {_point_key(p) for p in data.get("hasil_dilewati") or []}
+    questions, seen = [], set()
+    for q in result.get("perlu_hasil") or []:
+        if not isinstance(q, dict) or not q.get("poin_asli") or not q.get("pertanyaan"):
+            continue
+        key = _point_key(q["poin_asli"])
+        # AI kadang sedikit mengubah teks poin; cocokkan ke poin asli yang paling mirip
+        match = difflib.get_close_matches(key, list(originals), n=1, cutoff=0.8)
+        if match:
+            key = match[0]
+        if key in known or key in seen:
+            continue
+        seen.add(key)
+        questions.append({"poin_asli": originals.get(key, q["poin_asli"]), "pertanyaan": q["pertanyaan"]})
+    return questions[:5]
+
+
 async def tailor_flow(message, context, uid: int):
-    original = load_user(uid)["profile"]
+    data = load_user(uid)
+    job = context.user_data["job"]
+    msg = await message.reply_text("⏳ Menyesuaikan CV dengan lowongan (metode PAR)...")
+    try:
+        result = await asyncio.to_thread(ai_helper.tailor_cv, data["profile"], context.user_data["job_text"],
+                                         job.get("bahasa_lowongan") or "id", data.get("hasil_poin") or [])
+    except Exception as e:
+        log.exception("tailoring gagal")
+        await msg.edit_text(f"Gagal menyesuaikan CV: {e}", reply_markup=kb(
+            [("✍️ Pakai CV Asli & Buat Email Lamaran", "cl")]))
+        return
+    questions = par_questions(data, data["profile"], result)
+    if questions:
+        context.user_data["par"] = {"questions": questions, "i": 0, "answers": [], "result": result}
+        await msg.delete()
+        await ask_par_question(message, context)
+        return
+    await finish_tailor(msg, message, context, uid, result)
+
+
+async def ask_par_question(message, context):
+    par = context.user_data["par"]
+    q, i, total = par["questions"][par["i"]], par["i"], len(par["questions"])
+    intro = ("📝 Supaya poin CV kamu kuat dengan metode PAR (Problem → Action → Result), aku perlu hasil "
+             "nyata dari beberapa poin. Aku tidak akan mengarang angka; kalau memang tidak ada, lewati saja "
+             "(poin yang dilewati tidak ditanyakan lagi).\n\n") if i == 0 else ""
+    await message.reply_text(
+        f"{intro}Pertanyaan {i + 1}/{total}\nPoin: \"{q['poin_asli']}\"\n❓ {q['pertanyaan']}\n\n"
+        "Ketik jawabannya, contoh: \"waktu input data turun dari 2 jam jadi 15 menit\".",
+        reply_markup=kb([("⏭️ Lewati", "par:skip"), ("✅ Cukup, buat CV", "par:done")]))
+
+
+async def handle_par_answer(message, context, uid: int, text: str):
+    par = context.user_data["par"]
+    par["answers"].append({"poin": par["questions"][par["i"]]["poin_asli"], "hasil": text.strip()})
+    await next_par_question(message, context, uid)
+
+
+async def next_par_question(message, context, uid: int):
+    par = context.user_data["par"]
+    par["i"] += 1
+    if par["i"] < len(par["questions"]):
+        await ask_par_question(message, context)
+    else:
+        await complete_par(message, context, uid)
+
+
+async def btn_par(query, context, uid, data, arg):
+    """par:skip, par:done"""
+    par = context.user_data.get("par")
+    await query.edit_message_reply_markup(None)
+    if not par:
+        await query.message.reply_text("Sesi pertanyaan ini sudah selesai.")
+        return
+    if arg == "skip":
+        point = par["questions"][par["i"]]["poin_asli"]
+        update_user(uid, lambda d: d.__setitem__("hasil_dilewati", ((d.get("hasil_dilewati") or []) + [point])[-200:]))
+        await next_par_question(query.message, context, uid)
+    else:
+        await complete_par(query.message, context, uid)
+
+
+async def complete_par(message, context, uid: int):
+    """Simpan jawaban sebagai fakta (dipakai lagi untuk lowongan berikutnya), lalu buat CV-nya."""
+    par = context.user_data.pop("par")
+    answers = par["answers"]
+    if not answers:
+        msg = await message.reply_text("⏳ Membuat CV...")
+        await finish_tailor(msg, message, context, uid, par["result"])
+        return
+
+    def save_facts(d):
+        new_keys = {_point_key(a["poin"]) for a in answers}
+        d["hasil_poin"] = [f for f in d.get("hasil_poin") or [] if _point_key(f.get("poin")) not in new_keys] + answers
+        return d
+
+    data = update_user(uid, save_facts)
+    job = context.user_data["job"]
+    msg = await message.reply_text(f"⏳ Menyusun ulang CV dengan {len(answers)} hasil dari kamu...")
+    try:
+        result = await asyncio.to_thread(ai_helper.tailor_cv, data["profile"], context.user_data["job_text"],
+                                         job.get("bahasa_lowongan") or "id", data["hasil_poin"], False)
+    except Exception:
+        log.exception("tailoring ulang gagal, pakai hasil pertama")
+        result = par["result"]
+    await finish_tailor(msg, message, context, uid, result)
+
+
+async def finish_tailor(msg, message, context, uid: int, result: dict):
+    data = load_user(uid)
+    original = data["profile"]
     job = context.user_data["job"]
     job_text = context.user_data["job_text"]
     lang = job.get("bahasa_lowongan") or "id"
     old_score = int(job.get("skor") or 0)
-
-    msg = await message.reply_text("⏳ Menyesuaikan CV dengan lowongan...")
     try:
-        result = await asyncio.to_thread(ai_helper.tailor_cv, original, job_text, lang)
         tailored = ai_helper.guard_profile(original, result.get("profile") or {})
         await msg.edit_text("⏳ Menilai ulang CV yang sudah disesuaikan...")
         new_job = await asyncio.to_thread(ai_helper.analyze_job, tailored, job_text)
         filename = f"CV_{safe_name(original.get('nama') or 'Kandidat')}_{safe_name(job.get('posisi') or 'Lamaran')}.pdf"
         path = user_dir(uid) / filename
-        await asyncio.to_thread(cv_builder.build_pdf, tailored, str(path), lang)
+        font = await asyncio.to_thread(cv_builder.build_pdf, tailored, str(path), lang, cv_font_for(data))
     except Exception as e:
         log.exception("tailoring gagal")
         await msg.edit_text(f"Gagal menyesuaikan CV: {e}", reply_markup=kb(
-            [("✍️ Pakai CV Asli & Buat Cover Letter", "cl")]))
+            [("✍️ Pakai CV Asli & Buat Email Lamaran", "cl")]))
         return
 
     new_score = int(new_job.get("skor") or old_score)
@@ -683,14 +819,17 @@ async def tailor_flow(message, context, uid: int):
         note = ("\n\n⚠️ Skornya masih rendah walaupun CV sudah disesuaikan. "
                 "Lowongan ini mungkin memang kurang cocok, pertimbangkan untuk dilewati.")
     await msg.edit_text(
-        f"🛠️ CV sudah disesuaikan\nSkor: {old_score} → {new_score}\n\n"
+        f"🛠️ CV sudah disesuaikan (metode PAR)\nSkor: {old_score} → {new_score}\n\n"
         f"Yang diubah:\n{changes}\n\n"
         f"📚 Belum kamu miliki (TIDAK ditambahkan ke CV, bisa dipelajari):\n{learn}{note}")
+    font_note = f"Font: {cv_fonts.label(font)}"
+    if font != cv_font_for(data):
+        font_note += f" ({cv_fonts.label(cv_font_for(data))} gagal diambil, cek koneksi VPS)"
     with open(path, "rb") as f:
         await message.reply_document(
             f, filename=path.name,
-            caption="Cek dulu CV ini ya. Isinya hanya diambil dari CV asli kamu.",
-            reply_markup=kb([("✍️ Buat Cover Letter", "cl")],
+            caption=f"Cek dulu CV ini ya. Isinya hanya dari CV asli kamu dan hasil yang kamu konfirmasi.\n{font_note}",
+            reply_markup=kb([("✍️ Buat Email Lamaran", "cl")],
                             [("↩️ Pakai CV Asli", "orig"), ("❌ Lewati", "skip")]))
 
 
@@ -755,18 +894,21 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await msg.edit_text("⏳ Menganalisis isi CV...")
         profile = await asyncio.to_thread(ai_helper.extract_profile, text)
+        font_raw = await asyncio.to_thread(cv_parser.detect_font, str(path))
     except Exception as e:
         log.exception("gagal proses CV")
         await msg.edit_text(f"Gagal memproses CV: {e}")
         return
 
     data = load_user(uid)
-    data.update({"cv_path": str(path), "profile": profile})
+    data.update({"cv_path": str(path), "profile": profile, "font_asli": font_raw})
     save_user(uid, data)
     context.user_data.update({"job": None, "active_profile": profile, "tailored_cv": None})
     await msg.edit_text(
         f"✅ CV tersimpan, {profile.get('nama') or 'kamu'}!\n"
-        f"Skill terdeteksi: {', '.join((profile.get('skill') or [])[:10]) or '-'}\n\n"
+        f"Skill terdeteksi: {', '.join((profile.get('skill') or [])[:10]) or '-'}\n"
+        f"Font CV: {cv_fonts.clean_name(font_raw) if font_raw else 'tidak terdeteksi'}"
+        f" (CV yang disesuaikan memakai {cv_fonts.label(cv_fonts.resolve(font_raw))})\n\n"
         "Sekarang kirim link / teks lowongan, atau ketik /rekomendasi.")
 
 
@@ -783,7 +925,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
 
     if text in MENU_ACTIONS:
-        context.user_data.update({"awaiting_email": False, "gmail_form": None, "ai_form": None})
+        context.user_data.update({"awaiting_email": False, "gmail_form": None, "ai_form": None,
+                                  "font_form": False, "par": None})
         await MENU_ACTIONS[text](update, context)
         return
 
@@ -793,6 +936,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if context.user_data.get("ai_form"):
         await handle_ai_form(update.message, context, uid, text)
+        return
+
+    if context.user_data.get("font_form"):
+        await handle_font_form(update.message, context, uid, text)
+        return
+
+    if context.user_data.get("par"):
+        await handle_par_answer(update.message, context, uid, text)
         return
 
     if context.user_data.get("awaiting_email"):
@@ -822,7 +973,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Teksnya terlalu pendek. Kirim link lowongan atau paste deskripsi lengkapnya.")
         return
 
-    await process_job(update.message, context, uid, job_text)
+    await process_job(update.message, context, uid, job_text, source_from_link(url.group(0)) if url else None)
 
 
 # ================================================================ kirim email
@@ -857,7 +1008,7 @@ async def show_send_confirmation(message, context, uid: int):
         f"Ke: {context.user_data['recipient']}\n"
         f"Subjek: {email_subject(job, name)}\n"
         f"Lampiran: {Path(attach).name if attach else '-'} ({cv_type})\n"
-        f"Isi: cover letter di atas\n\n"
+        f"Isi: email lamaran di atas\n\n"
         f"Posisi: {job.get('posisi')} - {job.get('perusahaan')}" + (
             f"\nDari: {accounts[0].address}" if len(accounts) == 1 else "\n\nPilih akun Gmail pengirimnya:"),
         reply_markup=kb(*buttons, [("✏️ Ganti email tujuan", "editto"), ("❌ Batal", "cancel")]))
@@ -873,8 +1024,8 @@ async def btn_skip(query, context, uid, data, arg):
 
 async def btn_gaya(query, context, uid, data, style):
     update_user(uid, lambda d: d.__setitem__("gaya", style))
-    markup = kb([("🔄 Buat ulang cover letter", "cl")]) if context.user_data.get("job") else None
-    await safe_edit(query.message, f"✅ Gaya cover letter diubah ke {GAYA_LABEL.get(style)}.", markup)
+    markup = kb([("🔄 Buat ulang email lamaran", "cl")]) if context.user_data.get("job") else None
+    await safe_edit(query.message, f"✅ Gaya email lamaran diubah ke {GAYA_LABEL.get(style)}.", markup)
 
 
 async def btn_settings(query, context, uid, data, arg):
@@ -1294,6 +1445,56 @@ async def handle_ai_form(message, context, uid: int, text: str):
     await msg.edit_text(reply, reply_markup=markup)
 
 
+def font_view(data: dict, note: str = ""):
+    choice = data.get("font_cv", "auto")
+    raw = data.get("font_asli")
+    auto_family = cv_fonts.resolve(raw)
+    text = (f"{note}🔤 Font CV yang disesuaikan\n\n"
+            f"Font CV asli kamu: {cv_fonts.clean_name(raw) if raw else 'tidak terdeteksi'}\n"
+            f"Dipakai sekarang: {cv_fonts.label(cv_font_for(data))}\n\n"
+            "Font Microsoft (Calibri, Arial, Times New Roman, Cambria, Georgia) diganti padanannya yang "
+            "ukurannya identik, karena font Microsoft tidak boleh disebarkan bebas.")
+    rows = [[(f"{'✅ ' if choice == 'auto' else ''}📄 Sama seperti CV asli ({cv_fonts.label(auto_family)})",
+              "font:auto")]]
+    rows += [[(f"{'✅ ' if choice == fam else ''}{label}", f"font:{i}")] for i, (fam, label) in enumerate(cv_fonts.CHOICES)]
+    rows += [[("✏️ Font lain dari Google Fonts", "font:type")], [("⬅️ Pengaturan", "set:back")]]
+    return text, kb(*rows)
+
+
+async def btn_font(query, context, uid, data, arg):
+    """font, font:auto, font:<i>, font:type"""
+    if arg == "type":
+        context.user_data["font_form"] = True
+        await query.message.reply_text("Ketik nama font persis seperti di fonts.google.com, contoh: Raleway, Inter, "
+                                       "Nunito, Source Sans 3 (atau ketik batal):")
+        return
+    if arg == "auto" or arg.isdigit():
+        value = "auto" if arg == "auto" else cv_fonts.CHOICES[int(arg)][0]
+        data = update_user(uid, lambda d: d.__setitem__("font_cv", value) or d)
+        text, markup = font_view(data, "✅ Font disimpan, berlaku untuk CV berikutnya.\n\n")
+    else:
+        text, markup = font_view(data)
+    await safe_edit(query.message, text, markup)
+
+
+async def handle_font_form(message, context, uid: int, text: str):
+    if text.lower() == "batal":
+        context.user_data["font_form"] = False
+        await message.reply_text("Dibatalkan.")
+        return
+    family = " ".join(text.split())
+    msg = await message.reply_text(f"⏳ Mengambil font {family} dari Google Fonts...")
+    _, _, ok = await asyncio.to_thread(cv_fonts.ensure, family)
+    if not ok:
+        await msg.edit_text(f"Font \"{family}\" tidak ditemukan di Google Fonts (atau VPS tidak bisa mengaksesnya). "
+                            "Cek ejaannya di fonts.google.com lalu kirim lagi, atau ketik batal.")
+        return
+    context.user_data["font_form"] = False
+    data = update_user(uid, lambda d: d.__setitem__("font_cv", family) or d)
+    reply, markup = font_view(data, f"✅ Font {family} disimpan, berlaku untuk CV berikutnya.\n\n")
+    await msg.edit_text(reply, reply_markup=markup)
+
+
 async def btn_lamaran_list(query, context, uid, data, arg):
     text, markup = lamaran_list_view(data)
     await safe_edit(query.message, text, markup)
@@ -1409,7 +1610,7 @@ async def btn_recommendation(query, context, uid, data, rid):
                             "Buka lewat tombol 🌐 Buka, lalu copy-paste deskripsi lowongannya ke sini ya.")
         return
     await msg.delete()
-    await process_job(query.message, context, uid, job_text)
+    await process_job(query.message, context, uid, job_text, source_from_link(rec.get("link")))
 
 
 async def btn_retry_job(query, context, uid, data, arg):
@@ -1418,7 +1619,7 @@ async def btn_retry_job(query, context, uid, data, arg):
     if not job_text:
         await query.message.reply_text("Lowongan ini sudah tidak tersimpan. Kirim ulang lowongannya ya.")
         return
-    await process_job(query.message, context, uid, job_text)
+    await process_job(query.message, context, uid, job_text, context.user_data.get("retry_job_source"))
 
 
 # ---- tombol di bawah ini butuh lowongan yang sedang diproses (context.user_data["job"])
@@ -1430,29 +1631,29 @@ async def btn_tailor(query, context, uid, data, arg):
 async def btn_original_cv(query, context, uid, data, arg):
     context.user_data.update({"active_profile": data.get("profile"), "tailored_cv": None})
     await query.edit_message_reply_markup(None)
-    await query.message.reply_text("Oke, pakai CV asli.", reply_markup=kb([("✍️ Buat Cover Letter", "cl")]))
+    await query.message.reply_text("Oke, pakai CV asli.", reply_markup=kb([("✍️ Buat Email Lamaran", "cl")]))
 
 
 async def btn_cover_letter(query, context, uid, data, arg):
     profile = context.user_data.get("active_profile") or data.get("profile")
     style = data.get("gaya", "formal")
-    msg = await query.message.reply_text(f"⏳ Menulis cover letter ({GAYA_LABEL.get(style)})...")
+    msg = await query.message.reply_text(f"⏳ Menulis email lamaran ({GAYA_LABEL.get(style)})...")
     try:
         cl = await asyncio.to_thread(
             ai_helper.write_cover_letter, profile, context.user_data["job"], context.user_data["job_text"], style)
     except Exception as e:
-        log.exception("cover letter gagal")
-        await msg.edit_text(f"Gagal membuat cover letter: {e}")
+        log.exception("email lamaran gagal")
+        await msg.edit_text(f"Gagal membuat email lamaran: {e}")
         return
     context.user_data["cover_letter"] = cl
     context.user_data["draft_kind"] = "cl"
     await msg.edit_text(cl, reply_markup=cover_letter_buttons())
-    await query.message.reply_text("Mau diubah? Pakai /revisi <instruksi>, atau /gaya untuk ganti gaya.")
+    await query.message.reply_text("Mau diubah? Pakai /revisi <instruksi>, atau /gaya untuk ganti gaya email.")
 
 
 async def btn_send(query, context, uid, data, arg):
     if not context.user_data.get("cover_letter"):
-        await query.message.reply_text("Buat cover letter dulu.")
+        await query.message.reply_text("Buat email lamaran dulu.")
         return
     if not gmail_configured():
         await query.message.reply_text(GMAIL_MISSING)
@@ -1521,6 +1722,7 @@ async def btn_cancel_send(query, context, uid, data, arg):
 
 BUTTONS = {
     "skip": btn_skip, "gaya": btn_gaya, "set": btn_settings, "acc": btn_accounts, "ai": btn_ai,
+    "font": btn_font, "par": btn_par,
     "lamlist": btn_lamaran_list,
     "app": btn_app_detail, "st": btn_status,
     "str": lambda *a: btn_status(*a, new_message=True),
@@ -1529,7 +1731,7 @@ BUTTONS = {
     "tailor": btn_tailor, "orig": btn_original_cv, "cl": btn_cover_letter, "send": btn_send,
     "confirm": btn_confirm_send, "editto": btn_edit_recipient, "cancel": btn_cancel_send,
 }
-NEEDS_JOB = {"tailor", "orig", "cl", "send", "confirm", "editto", "cancel"}
+NEEDS_JOB = {"tailor", "orig", "cl", "send", "confirm", "editto", "cancel", "par"}
 
 
 @only_allowed
