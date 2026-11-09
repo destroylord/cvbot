@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026-11-09 (lanjutan): pratinjau skor sebelum PDF & 🚀 Tingkatkan lagi
+
+- Setelah penyesuaian CV, bot **menampilkan skor baru dulu** (skor awal → baru, skill cocok, skill yang masih
+  kurang, perubahan). **PDF baru dibuat setelah dipilih ✅ Pakai skor ini, buat CV.** Pilihan lain: 🚀 Tingkatkan
+  lagi, ↩️ Pakai CV asli (skor kembali ke skor awal), atau ❌ Lewati.
+- **🚀 Tingkatkan lagi**: skor dinaikkan secara jujur dengan menanyakan setiap skill yang kurang (maksimal 5):
+  "Pernah" + cerita singkat, atau "Belum". CV disusun ulang dengan pengalaman yang dikonfirmasi (`tailor_cv`
+  parameter `skills`), dinilai ulang, dan bisa diulang. Kalau sisa kekurangan semuanya "belum", bot menyatakan
+  itu skor maksimal yang jujur.
+- `guard_profile` menerima `extra_skills`: skill yang dikonfirmasi pengguna boleh masuk CV, skill karangan AI
+  tetap dibuang.
+- Jawaban diingat (`skill_konfirmasi`, `skill_belum`): skill yang "pernah" dipakai untuk lowongan berikutnya,
+  yang "belum" tidak ditanya ulang. Setelah konfirmasi, bot bertanya dulu sebelum menambahkan skill ke 📄 CV Saya.
+
+Diuji 24 pengecekan: pratinjau tanpa PDF, tanya-jawab pernah/belum, skill karangan tetap dibuang, tambah ke CV
+asli hanya setelah disetujui, skor maksimal jujur, PDF setelah disetujui, kembali ke CV asli, lowongan berikutnya,
+dan tombol kedaluwarsa.
+
+
 ## 2026-11-09 (lanjutan): ✨ Perbaiki poin dengan PAR untuk CV asli
 
 - Tombol baru di **📄 CV Saya**. AI (`improve_cv_par`) menulis ulang semua poin pengalaman dan proyek dengan

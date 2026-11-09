@@ -28,9 +28,10 @@ Daftar perubahan terbaru dan cara upgrade: lihat [CHANGELOG.md](CHANGELOG.md).
    - kirim **foto/screenshot poster lowongan**. Bot membaca isinya (termasuk email HR) pakai AI.
      Lowongan dari grup/channel lain cukup di-**forward** ke bot.
 3. Bot memberi skor kecocokan. Kalau skor di bawah `CV_TAILOR_THRESHOLD` (default 70),
-   CV otomatis disesuaikan dengan **metode PAR** dan dikirim sebagai PDF baru, lengkap dengan skor
-   sebelum/sesudah dan daftar perubahannya. Untuk skor tinggi, ada tombol **Sesuaikan CV** kalau mau.
+   CV otomatis disesuaikan dengan **metode PAR**. Untuk skor tinggi, ada tombol **Sesuaikan CV** kalau mau.
    Kalau ada poin penting yang belum punya hasil, bot menanyakannya dulu ke kamu (lihat di bawah).
+   Setelah itu bot menampilkan **skor baru dulu, belum membuat PDF**. Pilih **✅ Pakai skor ini, buat CV**,
+   atau **🚀 Tingkatkan lagi** (lihat [Tingkatkan skor](#-tingkatkan-skor)).
 4. Tekan **Buat Email Lamaran**, revisi pakai `/revisi <instruksi>` kalau perlu.
 5. Tekan **Kirim via Gmail**, cek konfirmasi, tekan **Ya, kirim** (atau **Kirim dari ...**
    kalau kamu memakai beberapa akun Gmail).
@@ -62,6 +63,23 @@ belum punya hasil, bot bertanya dulu, maksimal 5 pertanyaan:
 
 Jawaban kamu disimpan, jadi untuk lowongan berikutnya poin yang sama langsung memakai hasil itu tanpa
 ditanya ulang.
+
+### 🚀 Tingkatkan skor
+
+Menulis ulang kalimat saja tidak bisa menaikkan skor kalau lowongan meminta skill yang tidak ada di CV. Jadi
+satu-satunya cara jujur menaikkan skor adalah **menggali pengalaman nyata yang belum tertulis**:
+
+1. Setelah penyesuaian, bot menampilkan skor, skill yang cocok, dan yang **masih kurang**.
+2. **🚀 Tingkatkan lagi**: bot menanyakan setiap kekurangan, maksimal 5. "Lowongan ini meminta Docker. Kamu
+   pernah memakainya?" Jawab **✅ Pernah** lalu ceritakan singkat di mana dan untuk apa, atau **❌ Belum**.
+3. CV disusun ulang dengan pengalaman yang kamu konfirmasi, dinilai ulang, lalu skor baru ditampilkan. Ulangi
+   sampai puas.
+4. Kalau sisa kekurangan semuanya "belum", bot memberi tahu bahwa itu **skor maksimal yang jujur** untuk lowongan
+   tersebut. Skill yang belum kamu punya tidak pernah dimasukkan ke CV.
+
+Jawabanmu diingat: skill yang "pernah" langsung dipakai untuk lowongan berikutnya, dan yang "belum" tidak
+ditanyakan lagi. Setelah mengonfirmasi skill, bot bertanya **"Tambahkan ke 📄 CV Saya juga?"**. CV asli tidak
+berubah tanpa persetujuanmu.
 
 ### Font CV
 

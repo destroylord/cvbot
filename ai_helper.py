@@ -524,16 +524,18 @@ ISI EMAIL:
 
 # ---------------------------------------------------------------- tailoring CV
 def tailor_cv(profile: dict, job_text: str, lang: str | None, facts: list[dict] | None = None,
-              ask_missing: bool = True) -> dict:
+              ask_missing: bool = True, skills: list[dict] | None = None) -> dict:
     """Sesuaikan CV dengan lowongan memakai metode PAR (Problem -> Action -> Result).
 
     facts: hasil nyata yang sudah dikonfirmasi kandidat, [{"poin": <poin asli>, "hasil": <jawaban>}].
     ask_missing: minta daftar poin penting yang belum punya hasil (perlu_hasil) untuk ditanyakan ke kandidat.
+    skills: skill/pengalaman yang belum tertulis di CV tapi dikonfirmasi kandidat, [{"skill", "cerita"}].
     """
     language = "Bahasa Inggris" if lang == "en" else "Bahasa Indonesia"
     system = ("Kamu adalah penulis CV profesional yang SANGAT JUJUR. Kamu hanya boleh memakai "
               "fakta yang ada di CV asli dan hasil yang dikonfirmasi kandidat. " + JSON_ONLY)
     facts_text = "\n".join(f'- Poin: "{f["poin"]}" -> Hasil: {f["hasil"]}' for f in facts or []) or "(belum ada)"
+    skills_text = "\n".join(f'- {k["skill"]}: {k["cerita"]}' for k in skills or []) or "(belum ada)"
     missing_rule = (
         "\n- Kalau sebuah poin penting untuk lowongan ini tidak punya hasil di CV asli maupun di HASIL DARI "
         "KANDIDAT,\n  tulis poin itu sebagai Problem + Action saja (JANGAN mengarang hasil), lalu masukkan ke "
@@ -559,9 +561,12 @@ BOLEH:
 
 DILARANG:
 - menambah skill, tools, sertifikasi, pengalaman, proyek, angka, atau pencapaian yang tidak ada di CV asli
-  maupun di HASIL DARI KANDIDAT
+  maupun di HASIL DARI KANDIDAT atau SKILL TAMBAHAN DARI KANDIDAT
 - mengubah nama perusahaan, periode, atau pendidikan
-- mengubah atau menerjemahkan nama skill (salin persis dari CV asli)
+- mengubah atau menerjemahkan nama skill (salin persis dari CV asli atau SKILL TAMBAHAN DARI KANDIDAT)
+
+SKILL TAMBAHAN DARI KANDIDAT boleh dimasukkan ke daftar skill (tulis nama skill persis), dan ceritanya boleh
+dipakai di ringkasan atau sebagai poin di pengalaman/proyek yang sesuai, tanpa melebih-lebihkan isinya.
 
 Tulis isi CV dalam {language}.
 
@@ -576,6 +581,9 @@ PROFIL ASLI:
 
 HASIL DARI KANDIDAT (sudah dikonfirmasi kandidat, boleh dipakai sebagai Result):
 {facts_text}
+
+SKILL TAMBAHAN DARI KANDIDAT (belum tertulis di CV, sudah dikonfirmasi kandidat):
+{skills_text}
 
 LOWONGAN:
 {job_text[:7000]}"""
@@ -644,16 +652,18 @@ def _norm(value) -> str:
     return str(value or "").strip().lower()
 
 
-def guard_profile(original: dict, tailored: dict) -> dict:
-    """Pengaman tambahan: buang apa pun yang tidak ada di CV asli, kembalikan data faktual."""
+def guard_profile(original: dict, tailored: dict, extra_skills: list[str] | None = None) -> dict:
+    """Pengaman tambahan: buang apa pun yang tidak ada di CV asli, kembalikan data faktual.
+
+    extra_skills: skill yang belum tertulis di CV tapi sudah dikonfirmasi kandidat (boleh dipakai)."""
     result = dict(tailored)
 
     # Data pribadi, pendidikan, sertifikasi, bahasa selalu dari CV asli
     for key in ("nama", "email", "telepon", "lokasi", "tautan", "pendidikan", "sertifikasi", "bahasa"):
         result[key] = original.get(key)
 
-    # Skill: hanya yang memang ada di CV asli
-    orig_skills = {_norm(s) for s in original.get("skill") or []}
+    # Skill: hanya yang memang ada di CV asli atau dikonfirmasi kandidat
+    orig_skills = {_norm(s) for s in (original.get("skill") or []) + list(extra_skills or [])}
     skills = [s for s in tailored.get("skill") or [] if _norm(s) in orig_skills]
     result["skill"] = skills or original.get("skill") or []
 
