@@ -154,6 +154,8 @@ upload ulang setiap ada perubahan, ubah langsung dari tombol **📄 CV Saya** (a
   mengurutkannya, atau **➕ Tambah poin** (satu per baris, sebaiknya dengan pola PAR).
 - **🛠️ Skill**, **🎓 Pendidikan**, **📜 Sertifikasi**, **🌐 Bahasa**: tambah, ubah, hapus, dan urutkan. Skill bisa
   ditambah beberapa sekaligus, dipisah koma.
+- **✨ Perbaiki poin dengan PAR**: AI menulis ulang *semua* poin pengalaman dan proyek dengan metode PAR (lihat
+  di bawah).
 - **📥 Unduh CV (PDF)**: CV asli versi terbaru.
 
 Saat mengisi, ketik `-` untuk mengosongkan bagian yang opsional, atau `batal` untuk membatalkan.
@@ -161,6 +163,22 @@ Saat mengisi, ketik `-` untuk mengosongkan bagian yang opsional, atau `batal` un
 Setelah ada yang diubah, **lampiran "CV asli" saat melamar dibuat ulang dari data terbaru** (dengan font CV
 kamu), jadi yang terkirim bukan lagi file lama. Kalau kamu upload file CV baru, data CV asli diganti dengan
 hasil scan file itu.
+
+### ✨ Perbaiki poin dengan PAR
+
+Merapikan seluruh poin CV asli sekaligus, untuk CV umum, tidak terikat lowongan tertentu:
+
+1. AI menulis ulang setiap poin dengan pola Problem → Action → Result. Jumlah dan urutan poin dipertahankan,
+   dan posisi, perusahaan, serta periode tidak disentuh.
+2. Kalau ada poin penting yang belum ada hasilnya, bot **bertanya dulu** (sama seperti saat penyesuaian CV).
+   Jawabanmu juga dipakai untuk penyesuaian CV berikutnya.
+3. Bot menampilkan **pratinjau sebelum → sesudah**. CV asli baru berubah setelah kamu menekan
+   **✅ Simpan ke CV asli**.
+
+Pengaman angka: kalau AI menulis angka yang tidak ada di poin aslinya maupun di jawabanmu (misalnya "bug turun
+40%" padahal tidak pernah disebut), poin itu dikembalikan ke versi asli, dan pratinjau memberi tahu berapa poin
+yang dikembalikan. Kalau CV asli sempat diubah lewat menu lain sebelum kamu menekan Simpan, hasil PAR tidak
+disimpan supaya perubahanmu tidak tertimpa.
 
 ## Pengaturan Model AI
 

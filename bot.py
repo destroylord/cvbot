@@ -709,7 +709,7 @@ async def tailor_flow(message, context, uid: int):
         return
     questions = par_questions(data, data["profile"], result)
     if questions:
-        context.user_data["par"] = {"questions": questions, "i": 0, "answers": [], "result": result}
+        context.user_data["par"] = {"mode": "job", "questions": questions, "i": 0, "answers": [], "result": result}
         await msg.delete()
         await ask_par_question(message, context)
         return
@@ -750,6 +750,10 @@ async def btn_par(query, context, uid, data, arg):
     if not par:
         await query.message.reply_text("Sesi pertanyaan ini sudah selesai.")
         return
+    if par.get("mode") == "job" and not context.user_data.get("job"):
+        context.user_data["par"] = None
+        await query.message.reply_text("Sesi lowongan sudah habis. Kirim ulang lowongannya ya.")
+        return
     if arg == "skip":
         point = par["questions"][par["i"]]["poin_asli"]
         update_user(uid, lambda d: d.__setitem__("hasil_dilewati", ((d.get("hasil_dilewati") or []) + [point])[-200:]))
@@ -758,21 +762,27 @@ async def btn_par(query, context, uid, data, arg):
         await complete_par(query.message, context, uid)
 
 
+def save_facts(uid: int, answers: list[dict]) -> dict:
+    """Simpan jawaban hasil sebagai fakta; dipakai lagi untuk penyesuaian CV & perbaikan PAR berikutnya."""
+    def apply(d):
+        new_keys = {_point_key(a["poin"]) for a in answers}
+        d["hasil_poin"] = [f for f in d.get("hasil_poin") or [] if _point_key(f.get("poin")) not in new_keys] + answers
+        return d
+    return update_user(uid, apply)
+
+
 async def complete_par(message, context, uid: int):
-    """Simpan jawaban sebagai fakta (dipakai lagi untuk lowongan berikutnya), lalu buat CV-nya."""
     par = context.user_data.pop("par")
     answers = par["answers"]
+    if par.get("mode") == "master":
+        await finish_master_par(message, context, uid, par)
+        return
     if not answers:
         msg = await message.reply_text("⏳ Membuat CV...")
         await finish_tailor(msg, message, context, uid, par["result"])
         return
 
-    def save_facts(d):
-        new_keys = {_point_key(a["poin"]) for a in answers}
-        d["hasil_poin"] = [f for f in d.get("hasil_poin") or [] if _point_key(f.get("poin")) not in new_keys] + answers
-        return d
-
-    data = update_user(uid, save_facts)
+    data = save_facts(uid, answers)
     job = context.user_data["job"]
     msg = await message.reply_text(f"⏳ Menyusun ulang CV dengan {len(answers)} hasil dari kamu...")
     try:
@@ -1556,6 +1566,7 @@ def cv_overview(data: dict, note: str = ""):
         [(f"💼 Pengalaman ({counts['pengalaman']})", "cv:e:pengalaman"), (f"🧩 Proyek ({counts['proyek']})", "cv:e:proyek")],
         [(f"🛠️ Skill ({counts['skill']})", "cv:l:skill"), (f"🎓 Pendidikan ({counts['pendidikan']})", "cv:l:pendidikan")],
         [(f"📜 Sertifikasi ({counts['sertifikasi']})", "cv:l:sertifikasi"), (f"🌐 Bahasa ({counts['bahasa']})", "cv:l:bahasa")],
+        [("✨ Perbaiki poin dengan PAR", "cv:par")],
         [("📥 Unduh CV (PDF)", "cv:dl")])
 
 
@@ -1687,6 +1698,14 @@ async def _cv_action(query, context, uid, data, cmd, sec, nums, parts):
         return
     if cmd == "me":
         return await show(cv_me_view(data))
+    if cmd == "par":
+        await query.edit_message_reply_markup(None)
+        return await start_master_par(query.message, context, uid)
+    if cmd == "parok":
+        return await save_master_par(query, context, uid)
+    if cmd == "parno":
+        context.user_data["cv_par_pending"] = None
+        return await show(cv_overview(data, "Dibatalkan, CV asli tidak diubah.\n\n"))
     if cmd == "f":
         if sec not in pe.FIELDS:
             raise KeyError(sec)
@@ -1747,6 +1766,112 @@ async def _cv_action(query, context, uid, data, cmd, sec, nums, parts):
         edit_profile(uid, lambda prof: pe.point_move_up(prof, sec, nums[0], nums[1]))
         return await show(cv_entry_view(load_user(uid), sec, nums[0]))
     raise ValueError(cmd)
+
+
+# ---- ✨ Perbaiki poin dengan PAR (CV asli)
+async def start_master_par(message, context, uid: int):
+    data = load_user(uid)
+    profile = data["profile"]
+    if not any(e["poin"] for sec in pe.ENTRIES for e in pe.entries(dict(profile), sec)):
+        await message.reply_text("Belum ada poin pengalaman atau proyek untuk diperbaiki.",
+                                 reply_markup=kb([("⬅️ CV Saya", "cv")]))
+        return
+    msg = await message.reply_text("⏳ AI sedang memperbaiki semua poin pengalaman & proyek dengan metode PAR...")
+    try:
+        result = await asyncio.to_thread(ai_helper.improve_cv_par, profile, data.get("hasil_poin") or [])
+    except Exception as e:
+        log.exception("perbaikan PAR gagal")
+        await msg.edit_text(f"Gagal memperbaiki poin: {e}", reply_markup=kb([("🔄 Coba lagi", "cv:par")],
+                                                                          [("⬅️ CV Saya", "cv")]))
+        return
+    questions = par_questions(data, profile, result)
+    if questions:
+        context.user_data["par"] = {"mode": "master", "questions": questions, "i": 0, "answers": [], "result": result}
+        await msg.delete()
+        await ask_par_question(message, context)
+        return
+    await show_master_preview(msg, message, context, uid, result)
+
+
+async def finish_master_par(message, context, uid: int, par: dict):
+    answers, result = par["answers"], par["result"]
+    if not answers:
+        msg = await message.reply_text("⏳ Menyiapkan pratinjau...")
+        await show_master_preview(msg, message, context, uid, result)
+        return
+    data = save_facts(uid, answers)
+    msg = await message.reply_text(f"⏳ Menyusun ulang poin dengan {len(answers)} hasil dari kamu...")
+    try:
+        result = await asyncio.to_thread(ai_helper.improve_cv_par, data["profile"], data["hasil_poin"], False)
+    except Exception:
+        log.exception("perbaikan PAR ulang gagal, pakai hasil pertama")
+    await show_master_preview(msg, message, context, uid, result)
+
+
+async def show_master_preview(msg, message, context, uid: int, result: dict):
+    """Tampilkan sebelum/sesudah. CV asli baru berubah setelah pengguna menekan Simpan."""
+    data = load_user(uid)
+    _, changes, rejected = pe.merge_points(data["profile"], result, data.get("hasil_poin") or [])
+    if not changes:
+        note = (f"\n\n⚠️ {len(rejected)} usulan AI ditolak karena memuat angka yang tidak ada di CV maupun jawaban kamu."
+                if rejected else "")
+        await msg.edit_text(f"✅ Poin CV kamu sudah rapi, tidak ada yang perlu diubah.{note}",
+                            reply_markup=kb([("⬅️ CV Saya", "cv")]))
+        return
+    context.user_data["cv_par_pending"] = {"changes": changes, "snapshot": pe.points_snapshot(data["profile"])}
+
+    summary = "\n".join(f"• {c}" for c in result.get("perubahan") or [])
+    blocks = [f"✨ Pratinjau perbaikan PAR ({len(changes)} entri berubah)" + (f"\n\nYang diperbaiki:\n{summary}" if summary else "")]
+    for c in changes:
+        label = pe.ENTRIES[c["sec"]]["label"].split(" ", 1)[0]
+        before = "\n".join(f"  • {p}" for p in c["before"]) or "  (kosong)"
+        after = "\n".join(f"  • {p}" for p in c["after"])
+        blocks.append(f"{label} {c['title']}\nSebelum:\n{before}\nSesudah:\n{after}")
+    footer = "Simpan ke CV asli?"
+    if rejected:
+        footer = (f"⚠️ {len(rejected)} poin dikembalikan ke aslinya karena AI menulis angka yang tidak ada di CV "
+                  f"maupun jawaban kamu.\n\n{footer}")
+    blocks.append(footer)
+
+    chunks, current = [], ""
+    for block in blocks:
+        block = block[:3500]
+        if current and len(current) + len(block) + 2 > 3500:
+            chunks.append(current)
+            current = block
+        else:
+            current = f"{current}\n\n{block}" if current else block
+    chunks.append(current)
+    buttons = kb([("✅ Simpan ke CV asli", "cv:parok"), ("❌ Batal", "cv:parno")])
+    if len(chunks) == 1:
+        await msg.edit_text(chunks[0], reply_markup=buttons)
+        return
+    await msg.edit_text(chunks[0])
+    for chunk in chunks[1:-1]:
+        await message.reply_text(chunk)
+    await message.reply_text(chunks[-1], reply_markup=buttons)
+
+
+async def save_master_par(query, context, uid: int):
+    pending = context.user_data.get("cv_par_pending")
+    await query.edit_message_reply_markup(None)
+    if not pending:
+        await query.message.reply_text("Pratinjau ini sudah tidak berlaku. Jalankan ✨ Perbaiki poin dengan PAR lagi.")
+        return
+    if pe.points_snapshot(load_user(uid)["profile"]) != pending["snapshot"]:
+        context.user_data["cv_par_pending"] = None
+        await query.message.reply_text("CV asli sudah diubah sejak pratinjau dibuat, jadi tidak disimpan supaya "
+                                       "perubahanmu tidak tertimpa. Jalankan ✨ Perbaiki poin dengan PAR lagi.")
+        return
+
+    def apply(prof):
+        for c in pending["changes"]:
+            pe.entries(prof, c["sec"])[c["i"]]["poin"] = c["after"]
+
+    edit_profile(uid, apply)
+    context.user_data["cv_par_pending"] = None
+    text, markup = cv_overview(load_user(uid), f"✅ {len(pending['changes'])} entri diperbarui dengan metode PAR.\n\n")
+    await query.message.reply_text(text, reply_markup=markup)
 
 
 async def handle_cv_form(message, context, uid: int, text: str):
@@ -2051,7 +2176,7 @@ BUTTONS = {
     "tailor": btn_tailor, "orig": btn_original_cv, "cl": btn_cover_letter, "send": btn_send,
     "confirm": btn_confirm_send, "editto": btn_edit_recipient, "cancel": btn_cancel_send,
 }
-NEEDS_JOB = {"tailor", "orig", "cl", "send", "confirm", "editto", "cancel", "par"}
+NEEDS_JOB = {"tailor", "orig", "cl", "send", "confirm", "editto", "cancel"}
 
 
 @only_allowed

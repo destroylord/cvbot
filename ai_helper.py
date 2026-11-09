@@ -585,6 +585,61 @@ LOWONGAN:
     return result
 
 
+def improve_cv_par(profile: dict, facts: list[dict] | None = None, ask_missing: bool = True) -> dict:
+    """Tulis ulang semua poin pengalaman & proyek di CV asli dengan metode PAR (CV umum, bukan per lowongan).
+
+    Hanya poin yang dikembalikan; posisi, perusahaan, periode, dan nama proyek tidak disentuh.
+    Hasil: {"pengalaman": [[poin...], ...], "proyek": [[...]], "perubahan": [...], "perlu_hasil": [...]}
+    """
+    def outline(sec, title):
+        return [{"no": i + 1, "judul": title(e), "poin": e.get("poin") or []}
+                for i, e in enumerate(profile.get(sec) or []) if isinstance(e, dict)]
+
+    sections = {
+        "pengalaman": outline("pengalaman", lambda e: f"{e.get('posisi')} - {e.get('perusahaan')} ({e.get('periode')})"),
+        "proyek": outline("proyek", lambda e: e.get("nama")),
+    }
+    facts_text = "\n".join(f'- Poin: "{f["poin"]}" -> Hasil: {f["hasil"]}' for f in facts or []) or "(belum ada)"
+    missing_rule = (
+        "\n- Kalau poin penting tidak punya hasil di CV maupun di HASIL DARI KANDIDAT, tulis sebagai Problem + "
+        "Action saja,\n  lalu masukkan ke perlu_hasil: salin poin aslinya persis dan tulis satu pertanyaan singkat "
+        "bahasa Indonesia\n  tentang hasil/dampaknya. Maksimal 5 poin, pilih yang paling berdampak untuk karier "
+        "kandidat." if ask_missing else "")
+    system = ("Kamu adalah penulis CV profesional yang SANGAT JUJUR. Kamu hanya boleh memakai fakta yang ada di "
+              "CV dan hasil yang dikonfirmasi kandidat. " + JSON_ONLY)
+    prompt = f"""Tulis ulang SEMUA poin pengalaman dan proyek kandidat di bawah dengan metode PAR, untuk CV umum
+(tidak untuk lowongan tertentu).
+
+METODE PAR, satu kalimat ringkas per poin:
+- Problem: masalah atau kebutuhan (singkat, sebagai konteks)
+- Action: apa yang kandidat lakukan, diawali kata kerja aktif
+- Result: hasil atau dampaknya, sebisa mungkin terukur
+- Hasil HANYA dari poin asli atau HASIL DARI KANDIDAT. JANGAN mengarang angka, persentase, atau dampak.{missing_rule}
+
+Aturan:
+- Pertahankan jumlah dan urutan entri. Untuk tiap entri, pertahankan jumlah dan urutan poin (satu poin baru
+  untuk setiap poin asli). Jangan menggabungkan, memecah, atau menghapus poin.
+- Jangan menambah skill, tools, atau pencapaian yang tidak disebut.
+- Pakai bahasa yang sama dengan poin aslinya.
+- Poin yang sudah bagus boleh dibiarkan atau hanya dirapikan sedikit.
+
+Balas JSON:
+{{"pengalaman": [[poin baru untuk entri no 1], [poin baru untuk entri no 2], ...],
+"proyek": [[...], ...],
+"perubahan": [2-5 poin singkat bahasa Indonesia tentang apa yang kamu perbaiki],
+"perlu_hasil": [{{"poin_asli": "...", "pertanyaan": "..."}}]}}
+
+CV:
+{json.dumps(sections, ensure_ascii=False)}
+
+HASIL DARI KANDIDAT (sudah dikonfirmasi kandidat, boleh dipakai sebagai Result):
+{facts_text}"""
+    result = _parse_json(_ask(system, prompt, max_tokens=6000))
+    if not ask_missing:
+        result["perlu_hasil"] = []
+    return result
+
+
 def _norm(value) -> str:
     return str(value or "").strip().lower()
 

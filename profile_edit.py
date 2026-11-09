@@ -3,6 +3,8 @@
 Fungsi murni: menerima dan mengubah dict profil, tanpa Telegram. Profil hasil AI kadang berisi
 string atau null di field yang seharusnya list, jadi semua akses lewat _items / _entries.
 """
+import copy
+import re
 
 FIELDS = {"nama": "Nama", "email": "Email", "telepon": "Telepon", "lokasi": "Lokasi", "ringkasan": "Ringkasan"}
 
@@ -133,3 +135,51 @@ def point_delete(profile: dict, sec: str, i: int, j: int) -> str:
 
 def point_move_up(profile: dict, sec: str, i: int, j: int) -> None:
     _move_up(_entries(profile, sec)[i]["poin"], j)
+
+
+# ---------------------------------------------------------------- hasil "Perbaiki poin dengan PAR"
+_NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
+
+
+def _numbers(text: str) -> set[str]:
+    """Angka di teks, tanpa pemisah ribuan/desimal: '50.000' dan '50000' dianggap sama."""
+    return {re.sub(r"[.,]", "", n) for n in _NUMBER.findall(str(text or ""))}
+
+
+def merge_points(profile: dict, rewritten: dict, facts: list[dict]) -> tuple[dict, list[dict], list[str]]:
+    """Gabungkan poin hasil AI ke salinan profil.
+
+    rewritten: {"pengalaman": [[poin entri 1], [poin entri 2], ...], "proyek": [...]}, urutan sama dengan profil.
+    Poin baru yang memuat angka yang tidak ada di entri aslinya maupun di jawaban pengguna (facts)
+    dianggap karangan: poin itu dikembalikan ke aslinya.
+    Mengembalikan (profil baru, daftar perubahan per entri, daftar poin yang ditolak).
+    """
+    new_profile = copy.deepcopy(profile)
+    fact_numbers = set().union(*(_numbers(f.get("hasil")) for f in facts or [])) if facts else set()
+    changes, rejected = [], []
+    for sec in ENTRIES:
+        items = _entries(new_profile, sec)
+        for i, new_points in enumerate((rewritten or {}).get(sec) or []):
+            if i >= len(items) or not isinstance(new_points, list):
+                continue
+            entry = items[i]
+            old_points = list(entry["poin"])
+            source = " ".join(old_points + [str(entry.get(f) or "") for f in ENTRIES[sec]["fields"]])
+            allowed = _numbers(source) | fact_numbers
+            kept = []
+            for j, point in enumerate(_split(new_points)):
+                if _numbers(point) - allowed:
+                    rejected.append(point)
+                    if j < len(old_points):
+                        kept.append(old_points[j])
+                else:
+                    kept.append(point)
+            if kept and kept != old_points:
+                entry["poin"] = kept
+                changes.append({"sec": sec, "i": i, "title": entry_title(sec, entry), "before": old_points, "after": kept})
+    return new_profile, changes, rejected
+
+
+def points_snapshot(profile: dict) -> list:
+    """Isi semua poin, untuk memastikan CV tidak diubah di tempat lain sebelum hasil PAR disimpan."""
+    return [[e["poin"] for e in _entries(copy.deepcopy(profile), sec)] for sec in ENTRIES]

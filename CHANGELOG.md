@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-11-09 (lanjutan): ✨ Perbaiki poin dengan PAR untuk CV asli
+
+- Tombol baru di **📄 CV Saya**. AI (`improve_cv_par`) menulis ulang semua poin pengalaman dan proyek dengan
+  metode PAR untuk CV umum. Yang dikembalikan hanya poin per entri, dengan jumlah dan urutan yang sama, jadi
+  posisi, perusahaan, dan periode tidak tersentuh.
+- Memakai mekanisme tanya-jawab yang sama dengan penyesuaian CV (sekarang punya mode `job` dan `master`).
+  Jawaban disimpan ke `hasil_poin`, dan dipakai baik untuk penyesuaian CV maupun perbaikan berikutnya.
+- **Pratinjau sebelum → sesudah** (dipecah jadi beberapa pesan kalau panjang), lalu **Simpan** atau **Batal**.
+  CV asli baru berubah setelah disetujui, dan lampiran "CV asli" ikut dibuat ulang.
+- **Pengaman angka di kode** (`profile_edit.merge_points`): poin baru yang memuat angka yang tidak ada di entri
+  aslinya maupun di jawaban pengguna dikembalikan ke poin asli. `50.000` dan `50000` dianggap sama.
+- Kalau CV asli diubah lewat menu lain antara pratinjau dan Simpan, hasil PAR tidak disimpan supaya tidak
+  menimpa perubahan itu.
+
+Diuji 29 pengecekan (pengaman angka, prompt, alur tanya-jawab, pratinjau, simpan, batal, simpan dua kali,
+perubahan di tengah jalan, pratinjau panjang) ditambah uji regresi penyesuaian CV per lowongan.
+
+
 ## 2026-11-09 (lanjutan): 📄 CV Saya, ubah CV asli dari Telegram
 
 CV asli tidak perlu lagi di-upload ulang setiap ada perubahan. Tombol menu **👤 Profil** diganti **📄 CV Saya**
