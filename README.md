@@ -53,8 +53,11 @@ bukan dimasukkan ke CV. Tetap baca CV hasilnya sebelum mengirim.
 4. **AI**: tidak perlu diisi di `.env`. Setelah bot jalan, buka **⚙️ Pengaturan > 🤖 Model AI**
    (lihat [Pengaturan Model AI](#pengaturan-model-ai)). Pilihan provider:
    - **Gemini** (disarankan, ada kuota gratis): API key dari https://aistudio.google.com/apikey.
-   - **Claude** (berbayar): API key dari https://console.anthropic.com. Langganan Claude.ai tidak bisa
-     dipakai untuk bot ini. Install juga library-nya di VPS: `.venv/bin/pip install anthropic`.
+   - **OpenAI-compatible**: layanan apa pun yang memakai format API OpenAI, misalnya OpenRouter (banyak model
+     gratis), Groq, DeepSeek, Together AI, OpenAI, atau server lokal seperti LM Studio. Bebas memilih model.
+   - **Claude** (berbayar): login akun Claude Console lewat `ant auth login`, atau API key. Install juga
+     library-nya di VPS: `.venv/bin/pip install -U anthropic`. Kuota langganan Claude Pro/Max tidak bisa
+     dipakai untuk bot ini.
    - **Ollama** (gratis, lokal): install dari https://ollama.com lalu `ollama pull qwen2.5:7b`. Butuh RAM
      sekitar 16 GB, dan hasilnya biasanya kurang bagus dibanding Gemini/Claude.
 5. **Gmail App Password** (dipakai untuk kirim lamaran dan membaca job alert):
@@ -103,17 +106,36 @@ di laptop sekaligus. Dua bot dengan token yang sama akan saling bentrok.
 
 Buka **⚙️ Pengaturan > 🤖 Model AI**:
 
-- **🔁 Ganti provider**: Gemini, Claude, atau Ollama. Kalau API key provider itu belum ada, bot langsung
-  memintanya.
+- **🔁 Ganti provider**: Gemini, OpenAI-compatible, Claude, atau Ollama. Kalau API key provider itu belum
+  ada, bot langsung memintanya.
+- **🌐 Ganti alamat API** (OpenAI-compatible): pilih OpenRouter, Groq, DeepSeek, Together AI, OpenAI, Ollama,
+  atau LM Studio, atau ketik alamat sendiri. Server lokal bisa dipakai tanpa API key.
 - **🧠 Pilih model**: daftar model diambil langsung dari provider, jadi yang muncul pasti tersedia untuk
-  API key kamu. Bisa juga **✏️ Ketik nama model** secara manual.
-- **🛟 Model cadangan** (Gemini): dipakai otomatis kalau model utama sedang sibuk (503) atau kuotanya
-  habis (429). Pilih **🚫 Tanpa cadangan** untuk mematikannya.
+  API key kamu. Untuk OpenRouter, model gratis (`:free`) ditaruh paling atas. Bisa juga **✏️ Ketik nama
+  model** secara manual, untuk model apa pun.
+- **🛟 Model cadangan** (Gemini, OpenAI-compatible): dipakai otomatis kalau model utama sedang sibuk (503)
+  atau kena batas pemakaian (429). Bisa lebih dari satu (ketik, pisahkan koma). Pilih **🚫 Tanpa cadangan**
+  untuk mematikannya.
 - **🖼️ Model untuk foto** (Ollama): model vision untuk membaca poster lowongan.
 - **🔑 Ganti API key**: key dicek dulu ke provider sebelum disimpan. Pesan berisi key langsung dihapus
   dari chat, dan yang ditampilkan hanya 4 karakter terakhirnya.
 - **🧪 Tes AI**: kirim pertanyaan singkat ke AI untuk memastikan pengaturannya jalan, lengkap dengan waktu
   responsnya.
+
+### Claude: login atau API key
+
+Pilih **🔐 Login akun Claude Console** supaya tidak perlu API key `sk-...`. Caranya, sekali saja di VPS,
+sebagai user yang menjalankan bot:
+
+1. Install CLI `ant` dari https://github.com/anthropics/anthropic-cli/releases (file `linux_amd64` atau
+   `linux_arm64`), lalu taruh `ant` di `/usr/local/bin`.
+2. Jalankan `ant auth login --no-browser`, buka link yang muncul, login, lalu tempel kodenya ke terminal.
+3. Kalau ada baris `ANTHROPIC_API_KEY` di `.env`, hapus lalu `./bot.sh restart`. Key di environment selalu
+   menimpa login, bahkan kalau isinya kosong (baris kosong dibuang otomatis oleh bot).
+4. Di bot, tekan **🔄 Cek login**.
+
+Ini login ke akun **Claude Console** (pemakaian API, bayar sesuai pemakaian), bukan kuota langganan Claude
+Pro/Max. Login kedaluwarsa berkala. Kalau bot bilang login kedaluwarsa, ulangi langkah 2.
 
 Disimpan di `data/settings.json` (hanya bisa dibaca pemilik file) dan langsung berlaku tanpa restart.
 Pengaturan dari bot mengalahkan nilai di `.env`. Menu ini hanya aktif kalau `ALLOWED_USER_IDS` diisi.

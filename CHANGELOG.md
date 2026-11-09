@@ -1,5 +1,37 @@
 # Changelog
 
+## 2026-11-09 (lanjutan): provider OpenAI-compatible dan login Claude
+
+### Provider OpenAI-compatible
+Untuk layanan apa pun yang memakai format API OpenAI, jadi tidak terikat ke satu model atau penyedia.
+
+- Pilihan cepat: OpenRouter, Groq, DeepSeek, Together AI, OpenAI, Ollama `/v1`, LM Studio. Bisa juga ketik
+  alamat API sendiri.
+- API key opsional, untuk server lokal tanpa key.
+- Daftar model diambil dari `/models`. Model gratis OpenRouter (`:free`) ditaruh paling atas. Model apa pun bisa
+  diketik manual. Kalau server tidak menyediakan `/models`, key tetap disimpan.
+- Coba ulang otomatis untuk 5xx, koneksi putus, **dan 429** (batas per menit, umum di model gratis), lalu
+  pindah ke model cadangan. Model cadangan bisa lebih dari satu.
+- Bisa membaca foto lowongan (format `image_url`) kalau modelnya mendukung gambar.
+
+### Claude: login tanpa API key
+- Pilihan **🔐 Login akun Claude Console**. Bot memakai profil login dari `ant auth login --no-browser` di VPS,
+  jadi tidak perlu API key `sk-...`. Tombol **🔄 Cek login** memeriksa login lewat daftar model.
+- Pesan jelas untuk: belum login, login kedaluwarsa, dan `ANTHROPIC_API_KEY` di `.env` yang menimpa login.
+  Baris `ANTHROPIC_API_KEY=` kosong dari `.env.example` lama dibuang otomatis karena ikut menimpa login.
+- Catatan: ini login akun Claude Console (pemakaian API). Kuota langganan Claude Pro/Max tidak bisa dipakai bot.
+
+### Perbaikan
+- Claude: `max_tokens` minimal 16.000. Model Claude terbaru berpikir dulu sebelum menjawab, jadi `max_tokens`
+  kecil (20 untuk tes, 2.000–4.000 untuk JSON) bisa habis sebelum jawabannya keluar. Ditambah penanganan
+  `stop_reason` `refusal` dan jawaban terpotong.
+- Logika coba ulang & model cadangan Gemini dijadikan umum (`_with_fallback`) dan dipakai juga oleh
+  OpenAI-compatible.
+
+Diuji 49 pengecekan (termasuk library `anthropic` asli untuk kasus belum login) ditambah 8 pengecekan regresi
+Gemini. Pemindaian AST memastikan tidak ada tombol yang terkirim sebagai `parse_mode`.
+
+
 ## 2026-11-09 (lanjutan): atur Model AI dari bot
 
 Provider, model, dan API key AI tidak perlu lagi diatur di `.env`. Semua ada di
