@@ -475,7 +475,11 @@ Jika teks BUKAN lowongan kerja (misalnya halaman login atau error), balas: {{"bu
 Jika lowongan, balas JSON dengan key:
 posisi, perusahaan, email_hr (email untuk melamar jika tertulis, kalau tidak null),
 bahasa_lowongan ("id" atau "en"), skor (0-100, seberapa cocok kandidat),
-skill_cocok (list), skill_kurang (list), alasan (1-2 kalimat, bahasa Indonesia).
+skill_cocok (list), skill_kurang (list), alasan (1-2 kalimat, bahasa Indonesia),
+lokasi (kota, atau null), mode_kerja ("remote", "hybrid", "wfo", atau null kalau tidak disebut),
+gaji_min dan gaji_max (angka rupiah per bulan kalau tertulis, kalau tidak null),
+tanda_penipuan (list alasan singkat bahasa Indonesia kalau ada tanda lowongan palsu/penipuan, misalnya meminta
+biaya, data sensitif, atau janji tidak wajar; [] kalau tidak ada).
 Nilai dengan jujur, jangan terlalu murah hati.
 
 PROFIL KANDIDAT:
@@ -511,6 +515,7 @@ Nilai dengan jujur.
 
 Balas JSON:
 {{"lowongan": [{{"posisi": "...", "perusahaan": "...", "lokasi": "... atau null",
+"mode_kerja": "remote/hybrid/wfo atau null", "gaji_min": angka rupiah per bulan atau null, "gaji_max": angka atau null,
 "link_ref": "L12 (link ke halaman lowongan itu) atau null", "skor": 0, "alasan": "1 kalimat bahasa Indonesia"}}]}}
 Jika email tidak berisi lowongan, balas {{"lowongan": []}}.
 
@@ -520,6 +525,54 @@ PROFIL KANDIDAT:
 ISI EMAIL:
 {email_text[:14000]}"""
     return _parse_json(_ask(JSON_ONLY, prompt, max_tokens=3000)).get("lowongan") or []
+
+
+# ---------------------------------------------------------------- persiapan interview
+def interview_prep(profile: dict, app: dict, skills: list[dict] | None = None, facts: list[dict] | None = None) -> dict:
+    """Pertanyaan interview yang kemungkinan muncul + petunjuk jawaban dari pengalaman kandidat sendiri."""
+    extra = "\n".join([f"- Skill {k['skill']}: {k['cerita']}" for k in skills or []] +
+                      [f"- {f['poin']} -> hasil: {f['hasil']}" for f in facts or []]) or "(tidak ada)"
+    prompt = f"""Kandidat diundang interview untuk posisi {app.get('posisi')} di {app.get('perusahaan')}.
+
+Buat persiapan interview dalam bahasa Indonesia:
+- 8-10 pertanyaan yang paling mungkin ditanyakan: campuran umum (perkenalan, motivasi), teknis sesuai lowongan,
+  dan berdasarkan CV kandidat (terutama skill/pengalaman tambahan di bawah, karena itu yang sering digali).
+- Untuk tiap pertanyaan, petunjuk jawaban singkat yang merujuk ke pengalaman NYATA kandidat (sebut proyek/poin
+  yang relevan). Jangan mengarang pengalaman. Kalau kandidat lemah di topik itu, sarankan cara menjawab jujur.
+- 3-4 pertanyaan bagus untuk ditanyakan balik ke HR/user.
+- 3-5 tips singkat persiapan.
+
+Balas JSON:
+{{"pertanyaan": [{{"q": "...", "tipe": "umum/teknis/pengalaman", "tips": "..."}}],
+"tanya_balik": ["..."], "tips": ["..."]}}
+
+PROFIL KANDIDAT:
+{json.dumps(profile, ensure_ascii=False)}
+
+SKILL & HASIL TAMBAHAN YANG DIKONFIRMASI KANDIDAT:
+{extra}
+
+LOWONGAN:
+{(app.get('job_text') or '')[:5000]}"""
+    return _parse_json(_ask("Kamu adalah pelatih interview kerja yang jujur dan praktis. " + JSON_ONLY, prompt,
+                            max_tokens=4000))
+
+
+def interview_feedback(question: str, answer: str, profile: dict, posisi: str) -> str:
+    """Umpan balik singkat untuk jawaban latihan interview."""
+    prompt = f"""Kandidat sedang latihan interview untuk posisi {posisi}.
+
+Pertanyaan: {question}
+Jawaban kandidat: {answer}
+
+Beri umpan balik bahasa Indonesia, maksimal 120 kata, teks biasa tanpa markdown:
+1. Yang sudah bagus (1 kalimat).
+2. Yang perlu diperbaiki (1-2 poin konkret, misalnya struktur STAR/PAR, kurang contoh, terlalu panjang).
+3. Contoh kalimat jawaban yang lebih kuat, HANYA memakai fakta dari jawaban kandidat dan profilnya.
+
+PROFIL KANDIDAT (untuk konteks):
+{json.dumps({k: profile.get(k) for k in ('ringkasan', 'skill', 'pengalaman')}, ensure_ascii=False)[:4000]}"""
+    return _ask("Kamu adalah pelatih interview kerja yang jujur, ramah, dan to the point.", prompt, max_tokens=800)
 
 
 # ---------------------------------------------------------------- tailoring CV

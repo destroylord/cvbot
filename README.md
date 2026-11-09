@@ -198,6 +198,47 @@ Pengaman angka: kalau AI menulis angka yang tidak ada di poin aslinya maupun di 
 yang dikembalikan. Kalau CV asli sempat diubah lewat menu lain sebelum kamu menekan Simpan, hasil PAR tidak
 disimpan supaya perubahanmu tidak tertimpa.
 
+## Perlindungan & kebiasaan baik saat melamar
+
+### 🚨 Deteksi loker penipuan
+Setiap lowongan dicek tanda-tanda penipuan: meminta biaya (pelatihan, administrasi, seragam, medical), transfer
+uang atau deposit, foto KTP/KK/buku tabungan/OTP sejak awal, janji "pasti diterima", modus "like/review dibayar",
+hanya bisa dihubungi lewat WhatsApp, atau email HR memakai Gmail/Yahoo padahal atas nama PT. AI juga ikut
+menilai. Tanda yang serius (meminta uang atau data sensitif) ditampilkan sebagai **🚨 Waspada**, dan diingatkan
+lagi di layar konfirmasi kirim. Kalimat seperti "biaya pelatihan ditanggung perusahaan" tidak dianggap penipuan.
+
+### 🔁 Cegah lamaran dobel
+Kalau kamu pernah melamar ke perusahaan yang sama dengan posisi yang mirip, bot mengingatkan di ringkasan lowongan
+dan di layar konfirmasi. Penulisan nama perusahaan yang berbeda ("PT. Satubakery Indonesia" dan "Satubakery")
+tetap dikenali. Lowongan yang sudah pernah dilamar juga tidak muncul lagi di 🎯 Rekomendasi.
+
+### 🎯 Preferensi loker
+**⚙️ Pengaturan > 🎯 Preferensi loker**: kota, mode kerja (semua / remote saja / remote atau hybrid), gaji minimal
+(boleh ditulis `5jt` atau `5.000.000`), dan kata di judul posisi yang mau dihindari (misalnya `sales`). Lowongan
+yang tidak sesuai disaring dari 🎯 Rekomendasi, dan diberi peringatan kalau kamu kirim manual. Info yang tidak
+disebut di lowongan tidak dianggap masalah, dan lowongan remote selalu lolos filter kota.
+
+### 🕗 Kirim di jam kerja & batas harian
+Kalau kamu menekan kirim di luar jam kerja (Senin-Jumat 08.00-17.00), lamaran **dijadwalkan** ke jam 08.00 hari
+kerja berikutnya, supaya masuk saat HR membuka email. Tetap bisa **📤 Kirim sekarang saja** atau **❌ Batalkan**.
+Antrean bisa dilihat di **📂 Lamaran > 🕗 Antrean kirim**, dan tetap jalan walau bot sempat restart. Fitur ini
+bisa dimatikan di ⚙️ Pengaturan.
+
+Setiap akun Gmail dibatasi `MAX_SEND_PER_DAY` lamaran per hari (default 20), supaya akun tidak ditandai spam.
+Kalau batasnya tercapai, bot menawarkan menjadwalkan ke besok, atau tetap mengirim sekarang.
+
+### 🎤 Persiapan interview
+Saat balasan HR berupa undangan interview, notifikasinya punya tombol **🎤 Siapkan interview**. Tombol ini juga ada
+di detail setiap lamaran. Bot menyiapkan 8-10 pertanyaan yang kemungkinan ditanyakan (umum, teknis, dan dari CV
+kamu, terutama skill yang kamu konfirmasi saat 🚀 Tingkatkan lagi), petunjuk jawaban dari pengalaman nyata kamu,
+pertanyaan untuk ditanyakan balik, dan tips. **🗣️ Latihan tanya-jawab**: bot bertanya satu per satu, kamu
+menjawab, lalu AI memberi umpan balik dan contoh jawaban yang lebih kuat.
+
+### 💾 Backup data
+`/backup` atau **⚙️ Pengaturan > 💾 Backup data** mengirim file zip berisi profil CV, lamaran, jawaban PAR,
+preferensi, dan file CV. App password Gmail dan API key tidak ikut. Untuk memulihkan, kirim file zip itu ke bot
+lalu tekan **♻️ Pulihkan**. Data yang ada sebelumnya disimpan dulu sebagai cadangan.
+
 ## Pengaturan Model AI
 
 Buka **⚙️ Pengaturan > 🤖 Model AI**:
@@ -305,6 +346,7 @@ di samping kolom chat, jadi tidak perlu hafal perintahnya.
 - `/gaya` - atur gaya email lamaran (formal, santai, singkat)
 - `/cv` (atau `/profil`) - lihat & ubah CV asli kamu (📄 CV Saya)
 - `/revisi <instruksi>` - revisi email lamaran atau email follow-up terakhir
+- `/backup` - kirim backup data (CV, lamaran, preferensi) ke Telegram
 
 Isi **⚙️ Pengaturan**:
 

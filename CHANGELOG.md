@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-11-09 (lanjutan): 6 fitur perlindungan & produktivitas
+
+- **🚨 Deteksi loker penipuan** (`job_rules.scam_signals` + field `tanda_penipuan` dari AI): biaya rekrutmen,
+  transfer/deposit, data sensitif (KTP/KK/rekening/OTP), janji pasti diterima, modus like/review dibayar, hanya
+  WhatsApp, email gratis atas nama PT. Konteks aman ("ditanggung perusahaan", "tidak dipungut biaya") tidak memicu
+  peringatan. Tanda serius diulang di layar konfirmasi kirim.
+- **🎤 Persiapan interview** (`interview_prep`, `interview_feedback`): tombol di notifikasi undangan interview dan
+  di detail lamaran. Berisi pertanyaan, petunjuk jawaban dari pengalaman nyata, pertanyaan balik, dan tips (disimpan
+  per lamaran). Ada latihan tanya-jawab dengan umpan balik AI.
+- **🎯 Preferensi loker**: kota, mode kerja, gaji minimal, kata posisi yang dihindari. Rekomendasi disaring
+  (dengan info jumlah yang disaring), dan lowongan manual diberi peringatan. AI sekarang juga membaca `lokasi`,
+  `mode_kerja`, `gaji_min`, `gaji_max`.
+- **🔁 Cegah lamaran dobel**: peringatan di ringkasan dan konfirmasi, nama perusahaan dinormalisasi. Lowongan yang
+  sudah dilamar tidak direkomendasikan lagi.
+- **🕗 Jadwal kirim di jam kerja** (Senin-Jumat 08-17, bisa dimatikan) dan **batas harian per akun**
+  (`MAX_SEND_PER_DAY`, default 20). Antrean tersimpan di data pengguna, dijadwalkan ulang saat bot start, dan bisa
+  dikirim sekarang atau dibatalkan. Kalau gagal kirim, lamaran tetap di antrean. Pengiriman dirapikan jadi
+  `send_and_record`.
+- **💾 Backup & pulihkan**: `/backup` mengirim zip (tanpa password/API key). Kirim zip ke bot untuk memulihkan,
+  dengan konfirmasi, cadangan otomatis data sebelumnya, path folder disesuaikan, dan zip berbahaya (`../`) ditolak.
+
+Modul baru `job_rules.py` (fungsi murni). Diuji 54 pengecekan dengan waktu & antrean jadwal palsu, termasuk
+pengiriman terjadwal yang benar-benar dijalankan, gagal SMTP, batas harian, pulihkan backup dari folder pengguna
+lain, dan zip berbahaya.
+
+
 ## 2026-11-09 (lanjutan): pratinjau skor sebelum PDF & 🚀 Tingkatkan lagi
 
 - Setelah penyesuaian CV, bot **menampilkan skor baru dulu** (skor awal → baru, skill cocok, skill yang masih

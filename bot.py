@@ -3,12 +3,15 @@ email lamaran, dan kirim lamaran via Gmail (semi-otomatis: selalu minta konfirma
 import asyncio
 import datetime as dt
 import hashlib
+import io
+import json
 import logging
 import os
 import difflib
 import re
 import sys
 import time
+import zipfile
 from functools import wraps
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -37,6 +40,7 @@ import gmail_accounts  # noqa: E402
 import gmail_replies  # noqa: E402
 import job_alerts  # noqa: E402
 import job_fetcher  # noqa: E402
+import job_rules as rules  # noqa: E402
 import mailer  # noqa: E402
 import profile_edit as pe  # noqa: E402
 import storage  # noqa: E402
@@ -61,6 +65,7 @@ DAILY_CHECK_TIME = os.getenv("DAILY_CHECK_TIME", "08:00")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Jakarta")
 FOLLOWUP_DAYS = int(os.getenv("FOLLOWUP_DAYS", "7"))
 REPLY_CHECK_MINUTES = int(os.getenv("REPLY_CHECK_MINUTES", "60"))
+MAX_SEND_PER_DAY = int(os.getenv("MAX_SEND_PER_DAY", "20"))  # per akun Gmail, supaya tidak dianggap spam
 
 GAYA_LABEL = {"formal": "🎩 Formal", "santai": "😊 Santai", "singkat": "⚡ Singkat"}
 JENIS_LABEL = {
@@ -79,6 +84,7 @@ COMMANDS = [
     ("cv", "Lihat & ubah CV asli kamu"),
     ("pengaturan", "Model AI, gaya email, font CV, akun Gmail, notifikasi"),
     ("revisi", "Revisi email lamaran / follow-up terakhir"),
+    ("backup", "Backup data CV & lamaran ke Telegram"),
     ("start", "Cara pakai & tampilkan menu"),
 ]
 
@@ -183,7 +189,28 @@ def job_summary(job: dict) -> str:
             f"✅ Cocok: {', '.join(job.get('skill_cocok') or []) or '-'}\n"
             f"⚠️ Kurang: {', '.join(job.get('skill_kurang') or []) or '-'}\n\n"
             f"{job.get('alasan') or ''}\n"
-            f"Email HR: {job.get('email_hr') or 'tidak ditemukan'}")
+            f"Email HR: {job.get('email_hr') or 'tidak ditemukan'}"
+            + "".join(f"\n\n{w}" for w in job.get("peringatan") or []))
+
+
+def job_warnings(data: dict, job: dict, job_text: str) -> list[str]:
+    """Peringatan untuk satu lowongan: tanda penipuan, lamaran dobel, tidak sesuai preferensi."""
+    warnings = []
+    signals, serious = rules.scam_signals(job_text, job)
+    job["penipuan_serius"] = serious
+    if signals:
+        head = "🚨 Waspada kemungkinan penipuan:" if serious else "⚠️ Perlu dicek dulu:"
+        tail = "\nPerusahaan resmi tidak pernah meminta uang atau data sensitif dari pelamar." if serious else ""
+        warnings.append(head + "".join(f"\n• {x}" for x in signals) + tail)
+    dups = rules.find_duplicates(data.get("lamaran") or [], job.get("posisi"), job.get("perusahaan"))
+    if dups:
+        lines = [f"\n• #{a['id']} {a.get('posisi')} ({tracker.days_since(a, TIMEZONE)} hari lalu, "
+                 f"{tracker.STATUS.get(a.get('status'), a.get('status'))})" for a in dups[-3:]]
+        warnings.append(f"🔁 Kamu sudah pernah melamar ke {job.get('perusahaan')}:" + "".join(lines))
+    issues = rules.pref_issues(job, data.get("pref"))
+    if issues:
+        warnings.append("🎯 Tidak sesuai preferensi kamu:" + "".join(f"\n• {x}" for x in issues))
+    return warnings
 
 
 # ================================================================ commands
@@ -216,16 +243,20 @@ async def profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================================================================ tracker lamaran
 def lamaran_list_view(data: dict):
     apps = data.get("lamaran") or []
+    queue = data.get("antrian") or []
+    queue_row = [[(f"🕗 Antrean kirim ({len(queue)})", "q:list")]] if queue else []
     if not apps:
-        return "Belum ada lamaran yang terkirim lewat bot.", None
+        return ("Belum ada lamaran yang terkirim lewat bot." + (f"\n🕗 {len(queue)} lamaran terjadwal." if queue else ""),
+                kb(*queue_row) if queue else None)
     recent = apps[-10:][::-1]
     lines = [f"#{a['id']} {tracker.STATUS.get(a['status'], a['status'])} · {a.get('posisi')} - "
              f"{a.get('perusahaan')} ({tracker.days_since(a, TIMEZONE)} hari)" for a in recent]
     buttons = [(f"#{a['id']} {(a.get('perusahaan') or '-')[:18]}", f"app:{a['id']}") for a in recent]
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     text = (f"📂 Lamaran kamu ({len(apps)} total, 10 terbaru):\n\n" + "\n".join(lines) +
+            (f"\n\n🕗 {len(queue)} lamaran terjadwal belum terkirim." if queue else "") +
             "\n\nPilih lamaran untuk lihat detail, ubah status, atau buat follow-up.")
-    return text, kb(*rows)
+    return text, kb(*rows, *queue_row)
 
 
 def app_detail_view(app: dict):
@@ -246,7 +277,7 @@ def app_detail_view(app: dict):
         [("💬 Dibalas", f"st:{i}:dibalas"), ("🎤 Interview", f"st:{i}:interview")],
         [("❌ Ditolak", f"st:{i}:ditolak"), ("🎉 Diterima", f"st:{i}:diterima")],
         [("👻 Tidak ada kabar", f"st:{i}:tidak_ada_kabar")],
-        [("📨 Draft Follow-up", f"fu:{i}")],
+        [("📨 Draft Follow-up", f"fu:{i}"), ("🎤 Persiapan interview", f"iv:{i}")],
         [("⬅️ Daftar lamaran", "lamlist")])
 
 
@@ -277,7 +308,8 @@ async def gaya(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, reply_markup=markup)
 
 
-TOGGLES = {"auto_rekomendasi": "🎯 Rekomendasi harian", "auto_balasan": "📬 Cek balasan otomatis"}
+TOGGLES = {"auto_rekomendasi": "🎯 Rekomendasi harian", "auto_balasan": "📬 Cek balasan otomatis",
+           "jadwal_kirim": "🕗 Kirim di jam kerja"}
 
 
 def settings_view(data: dict):
@@ -293,10 +325,13 @@ def settings_view(data: dict):
             f"Akun Gmail default: {default.address if default else 'belum ada'}"
             f"{f' ({len(accounts)} akun terhubung)' if len(accounts) > 1 else ''}\n"
             f"Rekomendasi harian jam {DAILY_CHECK_TIME}: {onoff['auto_rekomendasi']}\n"
-            f"Cek balasan HR tiap {REPLY_CHECK_MINUTES} menit: {onoff['auto_balasan']}\n\n"
-            f"Jam dan ambang skor diatur di file .env.")
+            f"Cek balasan HR tiap {REPLY_CHECK_MINUTES} menit: {onoff['auto_balasan']}\n"
+            f"Kirim lamaran hanya di jam kerja (Senin-Jumat {rules.WORK_START:02d}.00-{rules.WORK_END:02d}.00): "
+            f"{onoff['jadwal_kirim']}\n"
+            f"Batas kirim: {MAX_SEND_PER_DAY} lamaran/hari per akun Gmail\n\n"
+            f"Jam cek, ambang skor, dan batas kirim diatur di file .env.")
     rows = [[("🤖 Model AI", "ai")], [("✍️ Gaya email lamaran", "set:gaya"), ("🔤 Font CV", "font")],
-            [("📧 Akun Gmail", "acc")]]
+            [("📧 Akun Gmail", "acc"), ("🎯 Preferensi loker", "pref")], [("💾 Backup data", "bk")]]
     rows += [[(f"{label}: {'ON ✅' if data.get(key, True) else 'OFF ⛔'}", f"set:tog:{key}")]
              for key, label in TOGGLES.items()]
     return text, kb(*rows)
@@ -452,10 +487,15 @@ async def send_recommendations(context, uid: int, chat_id: int, silent_if_empty:
     update_user(uid, lambda d: d.__setitem__("gmail_seen", (seen + processed)[-500:]))
 
     unique = dedupe_jobs(jobs)
-    top = top_jobs(unique)
+    apps = data.get("lamaran") or []
+    suitable = [j for j in unique if not rules.pref_issues(j, data.get("pref"))
+                and not rules.find_duplicates(apps, j.get("posisi"), j.get("perusahaan"))]
+    filtered = len(unique) - len(suitable)
+    top = top_jobs(suitable)
     if not top:
         await finish_progress(progress, f"Tidak ada rekomendasi baru dengan skor ≥ {MIN_REC_SCORE} "
-                                        f"({len(emails)} email baru dicek, {len(unique)} lowongan ditemukan).")
+                                        f"({len(emails)} email baru dicek, {len(unique)} lowongan ditemukan"
+                                        f"{f', {filtered} disaring' if filtered else ''}).")
         return
     await finish_progress(progress)
 
@@ -464,6 +504,9 @@ async def send_recommendations(context, uid: int, chat_id: int, silent_if_empty:
     while len(recs) > 50:
         recs.pop(next(iter(recs)))
     text, rows = recommendations_message(top)
+    if filtered:
+        text = (text + f"\n\n🎯 {filtered} lowongan lain disaring: tidak sesuai preferensi atau sudah pernah "
+                       "dilamar (atur di ⚙️ Pengaturan > 🎯 Preferensi loker).")[:4000]
     try:
         await bot.send_message(chat_id, text, reply_markup=InlineKeyboardMarkup(rows),
                                disable_notification=silent_if_empty)
@@ -596,8 +639,10 @@ async def check_replies(context, uid: int, chat_id: int, manual: bool = False):
             continue
         found += 1
         a, changed = result
-        await bot.send_message(chat_id, reply_message(a, reply, info, changed),
-                               reply_markup=kb([("📋 Lihat detail lamaran", f"app:{a['id']}")]),
+        rows = [[("📋 Lihat detail lamaran", f"app:{a['id']}")]]
+        if info.get("jenis") == "interview":
+            rows.insert(0, [("🎤 Siapkan interview", f"iv:{a['id']}")])
+        await bot.send_message(chat_id, reply_message(a, reply, info, changed), reply_markup=kb(*rows),
                                disable_notification=info.get("jenis") not in LOUD_REPLIES)
 
     if manual and not found and failed < len(by_account):
@@ -648,6 +693,7 @@ async def process_job(message, context, uid: int, job_text: str, source: str | N
         return
 
     job["sumber_info"] = source
+    job["peringatan"] = job_warnings(data, job, job_text)
     context.user_data.update({
         "job": job, "job_text": job_text, "active_profile": profile, "tailored_cv": None,
         "cover_letter": None, "recipient": None, "awaiting_email": False, "tailor_pending": None, "gap": None,
@@ -1036,8 +1082,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await process_job_image(update.message, context, update.effective_user.id, doc, IMAGE_EXT[ext])
         return
+    if ext == ".zip":
+        await receive_backup(update.message, context, update.effective_user.id, doc)
+        return
     if ext not in (".pdf", ".docx"):
-        await update.message.reply_text("Kirim CV dalam format PDF/DOCX, atau gambar lowongan (JPG/PNG).")
+        await update.message.reply_text("Kirim CV dalam format PDF/DOCX, gambar lowongan (JPG/PNG), "
+                                        "atau file backup (.zip).")
         return
 
     uid = update.effective_user.id
@@ -1091,7 +1141,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text in MENU_ACTIONS:
         context.user_data.update({"awaiting_email": False, "gmail_form": None, "ai_form": None,
-                                  "font_form": False, "par": None, "cv_form": None, "gap": None})
+                                  "font_form": False, "par": None, "cv_form": None, "gap": None,
+                                  "pref_form": None, "iv": None})
         await MENU_ACTIONS[text](update, context)
         return
 
@@ -1118,6 +1169,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     gap = context.user_data.get("gap")
     if gap and gap.get("awaiting_story"):
         await handle_gap_story(update.message, context, uid, text)
+        return
+
+    if context.user_data.get("pref_form"):
+        await handle_pref_form(update.message, context, uid, text)
+        return
+
+    if context.user_data.get("iv"):
+        await handle_iv_answer(update.message, context, uid, text)
         return
 
     if context.user_data.get("awaiting_email"):
@@ -1183,7 +1242,19 @@ async def show_send_confirmation(message, context, uid: int):
         order = sorted(range(len(accounts)), key=lambda i: accounts[i] != default)
         buttons = [[(f"{'⭐' if accounts[i] == default else '✅'} Kirim dari {accounts[i].address}", f"confirm:{i}")]
                    for i in order]
+    warnings = []
+    if job.get("penipuan_serius"):
+        warnings.append("🚨 Lowongan ini punya tanda penipuan serius (lihat ringkasan lowongan). Yakin tetap kirim?")
+    dups = rules.find_duplicates(load_user(uid).get("lamaran") or [], job.get("posisi"), job.get("perusahaan"))
+    if dups:
+        warnings.append(f"🔁 Kamu sudah pernah melamar ke {job.get('perusahaan')} "
+                        f"({len(dups)}x, terakhir #{dups[-1]['id']}).")
+    now = tracker.now(TIMEZONE)
+    if load_user(uid).get("jadwal_kirim", True) and not rules.in_work_hours(now):
+        warnings.append(f"🕗 Sekarang di luar jam kerja, jadi email dijadwalkan terkirim "
+                        f"{rules.when_label(rules.next_work_time(now), now)} (bisa dikirim sekarang setelahnya).")
     await message.reply_text(
+        "".join(f"{w}\n\n" for w in warnings) +
         f"Konfirmasi pengiriman:\n\n"
         f"Ke: {context.user_data['recipient']}\n"
         f"Subjek: {email_subject(job, name)}\n"
@@ -2100,6 +2171,276 @@ async def handle_cv_form(message, context, uid: int, text: str):
         await message.reply_text(CV_STALE)
 
 
+# ---- 🎯 Preferensi loker
+def pref_view(data: dict, note: str = ""):
+    prefs = data.get("pref") or {}
+    mode = prefs.get("mode") or "semua"
+    text = (f"{note}🎯 Preferensi loker\n\n"
+            f"📍 Lokasi: {', '.join(prefs.get('lokasi') or []) or 'semua'}\n"
+            f"🏠 Mode kerja: {rules.MODES[mode]}\n"
+            f"💰 Gaji minimal: {rules.rupiah(prefs['gaji_min']) if prefs.get('gaji_min') else '-'}\n"
+            f"🚫 Hindari posisi: {', '.join(prefs.get('hindari') or []) or '-'}\n\n"
+            "Lowongan yang tidak sesuai disaring dari 🎯 Rekomendasi, dan diberi peringatan kalau kamu kirim manual. "
+            "Info yang tidak disebut di lowongan tidak dianggap masalah.")
+    modes = [(f"{'✅ ' if key == mode else ''}{label}", f"pref:mode:{key}") for key, label in rules.MODES.items()]
+    return text, kb([("📍 Lokasi", "pref:lok"), ("💰 Gaji minimal", "pref:gaji")], modes,
+                    [("🚫 Posisi yang dihindari", "pref:hindari")], [("🔄 Reset", "pref:reset"), ("⬅️ Pengaturan", "set:back")])
+
+
+PREF_PROMPTS = {
+    "lok": "Ketik kota yang kamu mau, pisahkan koma (contoh: Malang, Surabaya, Jakarta). Lowongan remote selalu lolos.",
+    "gaji": "Ketik gaji minimal per bulan (contoh: 5jt atau 5.000.000).",
+    "hindari": "Ketik kata di judul posisi yang mau kamu hindari, pisahkan koma (contoh: sales, telemarketing).",
+}
+
+
+async def btn_pref(query, context, uid, data, arg):
+    """pref, pref:lok|gaji|hindari, pref:mode:<x>, pref:reset"""
+    parts = arg.split(":") if arg else [""]
+    if parts[0] in PREF_PROMPTS:
+        context.user_data["pref_form"] = parts[0]
+        await query.message.reply_text(PREF_PROMPTS[parts[0]] + "\n\nKetik - untuk mengosongkan, atau batal.")
+        return
+    note = ""
+    if parts[0] == "mode" and parts[1] in rules.MODES:
+        data = update_user(uid, lambda d: d.setdefault("pref", {}).__setitem__("mode", parts[1]) or d)
+        note = "✅ Tersimpan.\n\n"
+    elif parts[0] == "reset":
+        data = update_user(uid, lambda d: d.__setitem__("pref", {}) or d)
+        note = "✅ Preferensi dikosongkan.\n\n"
+    await safe_edit(query.message, *pref_view(data, note))
+
+
+async def handle_pref_form(message, context, uid: int, text: str):
+    field = context.user_data["pref_form"]
+    if text.lower() == "batal":
+        context.user_data["pref_form"] = None
+        await message.reply_text("Dibatalkan.")
+        return
+    value = text.strip()
+    if field == "gaji":
+        amount = None if value == "-" else rules.parse_salary(value)
+        if value != "-" and not amount:
+            await message.reply_text("Tidak terbaca. Contoh: 5jt atau 5.000.000. Coba lagi, atau ketik batal.")
+            return
+        stored = amount
+        key = "gaji_min"
+    else:
+        stored = [] if value == "-" else [v.strip() for v in value.replace("\n", ",").split(",") if v.strip()]
+        key = "lokasi" if field == "lok" else "hindari"
+    context.user_data["pref_form"] = None
+    data = update_user(uid, lambda d: d.setdefault("pref", {}).__setitem__(key, stored) or d)
+    reply, markup = pref_view(data, "✅ Tersimpan.\n\n")
+    await message.reply_text(reply, reply_markup=markup)
+
+
+# ---- 🎤 Persiapan interview
+def prep_messages(app: dict, prep: dict) -> list[str]:
+    blocks = [f"🎤 Persiapan interview: {app.get('posisi')} - {app.get('perusahaan')}\n\n"
+              "❓ Pertanyaan yang kemungkinan ditanyakan:"]
+    for n, q in enumerate(prep.get("pertanyaan") or [], 1):
+        blocks.append(f"{n}. {q.get('q')}" + (f" ({q['tipe']})" if q.get("tipe") else "") +
+                      (f"\n   💡 {q['tips']}" if q.get("tips") else ""))
+    if prep.get("tanya_balik"):
+        blocks.append("🙋 Pertanyaan untuk ditanyakan balik:" + "".join(f"\n• {x}" for x in prep["tanya_balik"]))
+    if prep.get("tips"):
+        blocks.append("📌 Tips:" + "".join(f"\n• {x}" for x in prep["tips"]))
+    chunks, current = [], ""
+    for block in blocks:
+        if current and len(current) + len(block) + 2 > 3800:
+            chunks.append(current)
+            current = block
+        else:
+            current = f"{current}\n\n{block}" if current else block
+    return chunks + [current]
+
+
+async def ask_iv_question(message, context):
+    iv = context.user_data["iv"]
+    q = iv["questions"][iv["i"]]
+    await message.reply_text(
+        f"🗣️ Latihan {iv['i'] + 1}/{len(iv['questions'])}" + (f" ({q['tipe']})" if q.get("tipe") else "") +
+        f"\n\n❓ {q.get('q')}\n\nKetik jawabanmu seperti sedang interview.",
+        reply_markup=kb([("⏭️ Lewati", "iv:n"), ("✅ Selesai", "iv:x")]))
+
+
+async def next_iv_question(message, context):
+    iv = context.user_data["iv"]
+    iv["i"] += 1
+    if iv["i"] < len(iv["questions"]):
+        await ask_iv_question(message, context)
+    else:
+        context.user_data["iv"] = None
+        await message.reply_text("✅ Latihan selesai. Semangat untuk interview-nya! 💪")
+
+
+async def btn_iv(query, context, uid, data, arg):
+    """iv:<id> (persiapan), iv:r:<id> (buat ulang), iv:p:<id> (latihan), iv:n (lewati), iv:x (selesai)"""
+    parts = arg.split(":")
+    if parts[0] in ("n", "x"):
+        await query.edit_message_reply_markup(None)
+        if not context.user_data.get("iv"):
+            await query.message.reply_text("Sesi latihan ini sudah selesai.")
+        elif parts[0] == "x":
+            context.user_data["iv"] = None
+            await query.message.reply_text("✅ Latihan selesai. Semangat untuk interview-nya! 💪")
+        else:
+            await next_iv_question(query.message, context)
+        return
+    mode = parts[0] if parts[0] in ("r", "p") else ""
+    app_id = int(parts[-1])
+    app = tracker.find(data, app_id)
+    if not app:
+        await query.message.reply_text("Lamaran tidak ditemukan.")
+        return
+    prep = app.get("interview_prep")
+    if not prep or mode == "r":
+        msg = await query.message.reply_text("⏳ Menyiapkan pertanyaan interview dari lowongan & CV kamu...")
+        try:
+            prep = await asyncio.to_thread(ai_helper.interview_prep, data.get("profile") or {}, app,
+                                           data.get("skill_konfirmasi") or [], data.get("hasil_poin") or [])
+        except Exception as e:
+            log.exception("persiapan interview gagal")
+            await msg.edit_text(f"Gagal menyiapkan interview: {e}", reply_markup=kb([("🔄 Coba lagi", f"iv:r:{app_id}")]))
+            return
+        update_user(uid, lambda d: (tracker.find(d, app_id) or {}).__setitem__("interview_prep", prep))
+        await msg.delete()
+    if mode == "p":
+        questions = [q for q in prep.get("pertanyaan") or [] if q.get("q")]
+        if not questions:
+            await query.message.reply_text("Belum ada pertanyaan untuk latihan.")
+            return
+        context.user_data["iv"] = {"app_id": app_id, "questions": questions, "i": 0}
+        await ask_iv_question(query.message, context)
+        return
+    chunks = prep_messages(app, prep)
+    for chunk in chunks[:-1]:
+        await query.message.reply_text(chunk)
+    await query.message.reply_text(chunks[-1], reply_markup=kb(
+        [("🗣️ Latihan tanya-jawab", f"iv:p:{app_id}")], [("🔄 Buat ulang", f"iv:r:{app_id}")]))
+
+
+async def handle_iv_answer(message, context, uid: int, text: str):
+    iv = context.user_data["iv"]
+    q = iv["questions"][iv["i"]]
+    data = load_user(uid)
+    app = tracker.find(data, iv["app_id"]) or {}
+    msg = await message.reply_text("⏳ Menilai jawabanmu...")
+    try:
+        feedback = await asyncio.to_thread(ai_helper.interview_feedback, q.get("q"), text, data.get("profile") or {},
+                                           app.get("posisi") or "")
+        await msg.edit_text(f"📝 Umpan balik:\n\n{feedback}"[:4000])
+    except Exception as e:
+        log.exception("umpan balik interview gagal")
+        await msg.edit_text(f"Gagal menilai jawaban: {e}")
+    await next_iv_question(message, context)
+
+
+# ---- 💾 Backup & pulihkan
+def build_backup(uid: int) -> bytes:
+    """Zip berisi data pengguna (profil, lamaran, pengaturan pribadi) dan file CV. Tanpa password/API key."""
+    buf = io.BytesIO()
+    folder = DATA_DIR / str(uid)
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(f"{uid}.json", (DATA_DIR / f"{uid}.json").read_text(encoding="utf-8")
+                   if (DATA_DIR / f"{uid}.json").exists() else "{}")
+        if folder.exists():
+            for f in folder.rglob("*"):
+                if f.is_file() and not f.name.endswith(".zip"):
+                    z.write(f, f"{uid}/{f.relative_to(folder).as_posix()}")
+        z.writestr("BACA.txt", "Backup CV Bot. Kirim file zip ini ke bot untuk memulihkan.\n"
+                               "Tidak berisi app password Gmail maupun API key AI.\n")
+    return buf.getvalue()
+
+
+async def send_backup(message, uid: int):
+    data = build_backup(uid)
+    name = f"cvbot-backup-{tracker.now(TIMEZONE).strftime('%Y%m%d-%H%M')}.zip"
+    await message.reply_document(io.BytesIO(data), filename=name, caption=(
+        "💾 Backup data kamu: profil CV, lamaran, jawaban PAR, preferensi, dan file CV. Tidak berisi app password "
+        "Gmail maupun API key. Simpan baik-baik, isinya data pribadi.\n\nUntuk memulihkan, kirim file ini ke bot."))
+
+
+@only_allowed
+async def backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_backup(update.message, update.effective_user.id)
+
+
+def _safe_member(name: str) -> bool:
+    parts = Path(name).parts
+    return not name.startswith(("/", "\\")) and ".." not in parts and ":" not in name
+
+
+async def receive_backup(message, context, uid: int, doc):
+    tmp = user_dir(uid) / "pulihkan.zip"
+    file = await doc.get_file()
+    await file.download_to_drive(tmp)
+    try:
+        with zipfile.ZipFile(tmp) as z:
+            jsons = [n for n in z.namelist() if re.fullmatch(r"\d+\.json", n)]
+            if len(jsons) != 1 or not all(_safe_member(n) for n in z.namelist()):
+                raise ValueError("bukan file backup CV Bot")
+            content = json.loads(z.read(jsons[0]).decode("utf-8"))
+            files = [n for n in z.namelist() if n.startswith(jsons[0][:-5] + "/") and not n.endswith("/")]
+    except (zipfile.BadZipFile, ValueError, UnicodeDecodeError) as e:
+        tmp.unlink(missing_ok=True)
+        await message.reply_text(f"File ini tidak bisa dipulihkan: {e}.")
+        return
+    context.user_data["restore"] = {"path": str(tmp), "old": jsons[0][:-5]}
+    name = (content.get("profile") or {}).get("nama") or "-"
+    await message.reply_text(
+        f"♻️ Backup berisi: CV atas nama {name}, {len(content.get('lamaran') or [])} lamaran, {len(files)} file.\n\n"
+        "Pulihkan? Data kamu sekarang akan diganti (salinannya disimpan dulu sebagai cadangan).",
+        reply_markup=kb([("♻️ Pulihkan", "bk:restore"), ("❌ Batal", "bk:cancel")]))
+
+
+def _rewrite_paths(value, old: str, new: str):
+    """Ganti folder data lama (data/<uid lama>/) dengan folder pengguna sekarang di semua path tersimpan."""
+    if isinstance(value, dict):
+        return {k: _rewrite_paths(v, old, new) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_rewrite_paths(v, old, new) for v in value]
+    if isinstance(value, str):
+        for sep in ("/", "\\"):
+            prefix = f"data{sep}{old}{sep}"
+            if value.startswith(prefix):
+                return str(DATA_DIR / new / value[len(prefix):].replace("\\", "/"))
+    return value
+
+
+async def btn_backup(query, context, uid, data, arg):
+    """bk (kirim backup), bk:restore, bk:cancel"""
+    if not arg:
+        await send_backup(query.message, uid)
+        return
+    restore = context.user_data.pop("restore", None)
+    await query.edit_message_reply_markup(None)
+    if not restore or not Path(restore["path"]).exists():
+        await query.message.reply_text("File backup sudah tidak ada. Kirim ulang file zip-nya.")
+        return
+    if arg == "cancel":
+        Path(restore["path"]).unlink(missing_ok=True)
+        await query.message.reply_text("Dibatalkan, data tidak diubah.")
+        return
+    safety = user_dir(uid) / f"sebelum-pulih-{tracker.now(TIMEZONE).strftime('%Y%m%d-%H%M%S')}.zip"
+    safety.write_bytes(build_backup(uid))
+    old, folder = restore["old"], user_dir(uid)
+    with zipfile.ZipFile(restore["path"]) as z:
+        content = json.loads(z.read(f"{old}.json").decode("utf-8"))
+        for name in z.namelist():
+            if name.startswith(f"{old}/") and not name.endswith("/") and _safe_member(name):
+                target = folder / name[len(old) + 1:]
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(z.read(name))
+    Path(restore["path"]).unlink(missing_ok=True)
+    content = _rewrite_paths(content, old, str(uid))
+    save_user(uid, content)
+    for item in content.get("antrian") or []:
+        schedule_queued(context.job_queue, uid, item)
+    await query.message.reply_text(f"✅ Data dipulihkan. Data sebelumnya disimpan di {safety.name}.",
+                                   reply_markup=main_menu())
+
+
 async def btn_lamaran_list(query, context, uid, data, arg):
     text, markup = lamaran_list_view(data)
     await safe_edit(query.message, text, markup)
@@ -2277,45 +2618,170 @@ async def btn_send(query, context, uid, data, arg):
         await query.message.reply_text("Email HR tidak ditemukan di lowongan. Ketik alamat email tujuannya:")
 
 
+async def send_and_record(uid: int, account, recipient: str, subject: str, body: str, attach: str | None,
+                          info: dict) -> dict:
+    """Kirim email lamaran lalu catat di 📂 Lamaran. Melempar error kalau gagal kirim."""
+    message_id = await asyncio.to_thread(mailer.send_application, account, recipient, subject, body, attach)
+    full = {**info, "ke": recipient, "dari": account.address, "subjek": subject, "message_id": message_id}
+    return update_user(uid, lambda d: tracker.add_application(d, full, TIMEZONE))
+
+
+def sent_message(app: dict) -> str:
+    return (f"✅ Lamaran #{app['id']} terkirim ke {app['ke']} dari {app['dari']}. Semoga lolos! 🍀\n\n"
+            f"Balasan HR akan dicek otomatis, dan kalau {FOLLOWUP_DAYS} hari belum ada kabar "
+            f"aku ingatkan untuk follow-up. Lihat semua lamaran di /lamaran.")
+
+
 async def btn_confirm_send(query, context, uid, data, arg):
-    """confirm:<indeks akun Gmail>"""
+    """confirm:<indeks akun>[:now|:later]. now = abaikan jadwal & batas harian, later = jadwalkan."""
     recipient = context.user_data.get("recipient")
-    if not recipient:
-        await query.message.reply_text("Alamat tujuan belum ada.")
+    if not recipient or not context.user_data.get("cover_letter"):
+        await query.message.reply_text("Alamat tujuan atau email lamarannya belum ada.")
         return
+    parts = (arg or "0").split(":")
+    force = parts[1] if len(parts) > 1 else ""
     accounts = gmail_accounts.load()
-    idx = int(arg or 0)
+    idx = int(parts[0] or 0)
     if idx >= len(accounts):
         await query.message.reply_text("Daftar akun Gmail sudah berubah. Tekan 📧 Kirim via Gmail lagi.")
         return
     account = accounts[idx]
     job = context.user_data["job"]
     await query.edit_message_reply_markup(None)
-    msg = await query.message.reply_text(f"⏳ Mengirim email dari {account.address}...")
     subject = email_subject(job, (data.get("profile") or {}).get("nama") or "")
+    info = {
+        "posisi": job.get("posisi"), "perusahaan": job.get("perusahaan"),
+        "skor": job.get("skor"), "bahasa": job.get("bahasa_lowongan"),
+        "cv_disesuaikan": bool(context.user_data.get("tailored_cv")), "gaya": data.get("gaya", "formal"),
+        "job_text": (context.user_data.get("job_text") or "")[:4000],
+    }
+    now = tracker.now(TIMEZONE)
+    count = rules.sent_on(data.get("lamaran") or [], account.address, now.date())
+    if not force and count >= MAX_SEND_PER_DAY:
+        await query.message.reply_text(
+            f"⛔ {account.address} sudah mengirim {count} lamaran hari ini (batas {MAX_SEND_PER_DAY}). Terlalu banyak "
+            "email per hari bisa membuat akun Gmail kamu ditandai spam.",
+            reply_markup=kb([(f"🕗 Jadwalkan {rules.when_label(rules.next_work_time(now), now)}", f"confirm:{idx}:later")],
+                            [("📤 Tetap kirim sekarang", f"confirm:{idx}:now"), ("❌ Batal", "cancel")]))
+        return
+    if force == "later" or (force != "now" and data.get("jadwal_kirim", True) and not rules.in_work_hours(now)):
+        when = rules.next_work_time(now)
+        item = queue_add(uid, when, account.address, recipient, subject, context.user_data["cover_letter"],
+                         attachment_path(context, uid), info)
+        schedule_queued(context.job_queue, uid, item)
+        context.user_data["cover_letter"] = None
+        await query.message.reply_text(
+            f"🕗 Lamaran ke {recipient} dijadwalkan terkirim {rules.when_label(when, now)} dari {account.address}, "
+            "di jam kerja supaya lebih mungkin dibaca HR.",
+            reply_markup=kb([("📤 Kirim sekarang saja", f"q:now:{item['id']}"), ("❌ Batalkan", f"q:del:{item['id']}")]))
+        return
+
+    msg = await query.message.reply_text(f"⏳ Mengirim email dari {account.address}...")
     try:
-        message_id = await asyncio.to_thread(
-            mailer.send_application, account, recipient, subject,
-            context.user_data["cover_letter"], attachment_path(context, uid))
+        app = await send_and_record(uid, account, recipient, subject, context.user_data["cover_letter"],
+                                    attachment_path(context, uid), info)
     except Exception as e:
         log.exception("kirim email gagal")
         where = "file .env" if account.from_env else "⚙️ Pengaturan > 📧 Akun Gmail"
         await msg.edit_text(f"Gagal mengirim: {e}\nCek app password {account.address} di {where}.")
         return
-    info = {
-        "posisi": job.get("posisi"), "perusahaan": job.get("perusahaan"), "ke": recipient,
-        "dari": account.address,
-        "skor": job.get("skor"), "bahasa": job.get("bahasa_lowongan"),
-        "cv_disesuaikan": bool(context.user_data.get("tailored_cv")), "subjek": subject,
-        "message_id": message_id, "gaya": data.get("gaya", "formal"),
-        "job_text": (context.user_data.get("job_text") or "")[:4000],
-    }
-    app = update_user(uid, lambda d: tracker.add_application(d, info, TIMEZONE))
     context.user_data["cover_letter"] = None
-    await msg.edit_text(
-        f"✅ Lamaran #{app['id']} terkirim ke {recipient} dari {account.address}. Semoga lolos! 🍀\n\n"
-        f"Balasan HR akan dicek otomatis, dan kalau {FOLLOWUP_DAYS} hari belum ada kabar "
-        f"aku ingatkan untuk follow-up. Lihat semua lamaran di /lamaran.")
+    await msg.edit_text(sent_message(app))
+
+
+# ---- 🕗 antrean kirim (jam kerja / batas harian)
+def queue_add(uid: int, when, account: str, recipient: str, subject: str, body: str, attach: str | None,
+              info: dict) -> dict:
+    def apply(d):
+        d["next_queue_id"] = d.get("next_queue_id", 0) + 1
+        item = {"id": d["next_queue_id"], "waktu": when.isoformat(timespec="minutes"), "akun": account,
+                "ke": recipient, "subjek": subject, "isi": body, "lampiran": attach, "info": info}
+        d.setdefault("antrian", []).append(item)
+        return item
+    return update_user(uid, apply)
+
+
+def _queue_job_name(uid: int, qid: int) -> str:
+    return f"antrian_{uid}_{qid}"
+
+
+def schedule_queued(job_queue, uid: int, item: dict) -> None:
+    if job_queue is None:
+        log.warning("job queue tidak aktif, lamaran terjadwal #%s hanya bisa dikirim manual", item["id"])
+        return
+    when = dt.datetime.fromisoformat(item["waktu"])
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=ZoneInfo(TIMEZONE))
+    now = tracker.now(TIMEZONE)
+    if when <= now:
+        when = now + dt.timedelta(seconds=30)  # terlewat (misalnya bot sempat mati): kirim sebentar lagi
+    job_queue.run_once(send_queued_job, when=when, data={"uid": uid, "id": item["id"]},
+                       name=_queue_job_name(uid, item["id"]), chat_id=uid, user_id=uid)
+
+
+def unschedule_queued(job_queue, uid: int, qid: int) -> None:
+    if job_queue is not None:
+        for job in job_queue.get_jobs_by_name(_queue_job_name(uid, qid)):
+            job.schedule_removal()
+
+
+async def send_queued_job(context: ContextTypes.DEFAULT_TYPE):
+    await deliver_queued(context.bot, context.job.data["uid"], context.job.data["id"])
+
+
+async def deliver_queued(bot, uid: int, qid: int) -> None:
+    """Kirim satu lamaran dari antrean. Kalau gagal, tetap di antrean dan pengguna diberi tahu."""
+    item = next((q for q in load_user(uid).get("antrian") or [] if q["id"] == qid), None)
+    if not item:
+        return
+    account = gmail_accounts.get(item["akun"])
+    if not account:
+        await bot.send_message(uid, f"❌ Lamaran terjadwal ke {item['ke']} gagal: akun {item['akun']} sudah tidak "
+                                    "terdaftar. Lihat 📂 Lamaran > 🕗 Antrean kirim.")
+        return
+    try:
+        app = await send_and_record(uid, account, item["ke"], item["subjek"], item["isi"], item["lampiran"], item["info"])
+    except Exception as e:
+        log.exception("kirim lamaran terjadwal gagal")
+        await bot.send_message(uid, f"❌ Lamaran terjadwal ke {item['ke']} gagal dikirim: {e}\n"
+                                    "Masih ada di 📂 Lamaran > 🕗 Antrean kirim, bisa dicoba kirim lagi.")
+        return
+    update_user(uid, lambda d: d.__setitem__("antrian", [q for q in d.get("antrian") or [] if q["id"] != qid]))
+    await bot.send_message(uid, "🕗 " + sent_message(app))
+
+
+def queue_view(data: dict, note: str = ""):
+    queue = data.get("antrian") or []
+    if not queue:
+        return f"{note}Tidak ada lamaran terjadwal.", kb([("⬅️ Daftar lamaran", "lamlist")])
+    now = tracker.now(TIMEZONE)
+    lines, rows = [], []
+    for q in queue:
+        when = dt.datetime.fromisoformat(q["waktu"])
+        lines.append(f"• {q['info'].get('posisi')} - {q['info'].get('perusahaan')} → {q['ke']}, "
+                     f"{rules.when_label(when, now)}")
+        rows.append([(f"📤 Kirim #{q['id']} sekarang", f"q:now:{q['id']}"), (f"❌ Batalkan #{q['id']}", f"q:del:{q['id']}")])
+    return f"{note}🕗 Antrean kirim\n\n" + "\n".join(lines), kb(*rows, [("⬅️ Daftar lamaran", "lamlist")])
+
+
+async def btn_queue(query, context, uid, data, arg):
+    """q:list, q:now:<id>, q:del:<id>"""
+    parts = arg.split(":")
+    if parts[0] == "list":
+        await safe_edit(query.message, *queue_view(data))
+        return
+    qid = int(parts[1])
+    await query.edit_message_reply_markup(None)
+    if not any(q["id"] == qid for q in data.get("antrian") or []):
+        await query.message.reply_text("Lamaran ini sudah tidak ada di antrean (mungkin sudah terkirim atau dibatalkan).")
+        return
+    unschedule_queued(context.job_queue, uid, qid)
+    if parts[0] == "del":
+        update_user(uid, lambda d: d.__setitem__("antrian", [q for q in d.get("antrian") or [] if q["id"] != qid]))
+        await query.message.reply_text("Dibatalkan. Lamaran ini tidak akan dikirim.")
+        return
+    await query.message.reply_text("⏳ Mengirim sekarang...")
+    await deliver_queued(context.bot, uid, qid)
 
 
 async def btn_edit_recipient(query, context, uid, data, arg):
@@ -2333,6 +2799,7 @@ async def btn_cancel_send(query, context, uid, data, arg):
 BUTTONS = {
     "skip": btn_skip, "gaya": btn_gaya, "set": btn_settings, "acc": btn_accounts, "ai": btn_ai,
     "font": btn_font, "par": btn_par, "cv": btn_cv, "tl": btn_tailor_result, "gap": btn_gap,
+    "pref": btn_pref, "iv": btn_iv, "q": btn_queue, "bk": btn_backup,
     "lamlist": btn_lamaran_list,
     "app": btn_app_detail, "st": btn_status,
     "str": lambda *a: btn_status(*a, new_message=True),
@@ -2382,6 +2849,7 @@ def main():
     app.add_handler(CommandHandler(["pengaturan", "config"], pengaturan))
     app.add_handler(CommandHandler("cekbalasan", cekbalasan))
     app.add_handler(CommandHandler("rekomendasi", rekomendasi))
+    app.add_handler(CommandHandler("backup", backup))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
@@ -2396,6 +2864,9 @@ def main():
                                         chat_id=uid, user_id=uid, name=f"replies_{uid}")
         log.info("Rekomendasi & pengingat harian jam %s (%s), cek balasan HR tiap %s menit",
                  DAILY_CHECK_TIME, TIMEZONE, REPLY_CHECK_MINUTES)
+        for uid in ALLOWED:  # lamaran terjadwal yang belum terkirim (misalnya setelah bot restart)
+            for item in load_user(uid).get("antrian") or []:
+                schedule_queued(app.job_queue, uid, item)
 
     log.info("Bot berjalan...")
     app.run_polling()
