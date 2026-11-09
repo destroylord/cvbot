@@ -122,6 +122,22 @@ Buka **⚙️ Pengaturan > 🤖 Model AI**:
 - **🧪 Tes AI**: kirim pertanyaan singkat ke AI untuk memastikan pengaturannya jalan, lengkap dengan waktu
   responsnya.
 
+### Kalau Gemini gagal
+
+Pesan error menyebut alasan untuk **setiap model yang dicoba**:
+
+- **tidak termasuk kuota gratis (limit 0)**: model ini hanya untuk akun berbayar di API key kamu. Model baru
+  sering seperti ini. Pilih model lain lewat **🧠 Pilih model**.
+- **model tidak ditemukan**: nama model salah ketik atau tidak tersedia untuk API key kamu. Nama model harus
+  persis, misalnya `gemini-3.8-flash`, bukan `gemini 3.8`.
+- **kuota / batas pemakaian habis**: tunggu sebentar.
+- **server sedang sibuk**: coba lagi beberapa menit kemudian.
+- **User location is not supported**: Gemini tidak melayani negara lokasi VPS kamu. Pakai provider lain.
+
+Model default: `gemini-3.6-flash`, cadangan `gemini-3.5-flash-lite` lalu `gemini-2.5-flash`. Yang pasti bisa
+dipakai adalah model yang muncul di **🧠 Pilih model**, karena daftarnya diambil langsung dari Google untuk
+API key kamu.
+
 ### Claude: login atau API key
 
 Pilih **🔐 Login akun Claude Console** supaya tidak perlu API key `sk-...`. Caranya, sekali saja di VPS,

@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-11-09 (lanjutan): alasan Gemini gagal ditampilkan jelas
+
+Sebelumnya, log dan pesan bot menyebut "tidak tersedia" untuk semua jenis kegagalan (server sibuk, kuota habis,
+model tidak ada), jadi penyebab sebenarnya tidak kelihatan.
+
+- Pesan error sekarang merinci **alasan per model** beserta pesan asli dari server, tanpa JSON mentah: tidak
+  termasuk kuota gratis (`limit: 0`), model tidak ditemukan, kuota habis sementara, server sibuk.
+- Error 429 `limit: 0` (model di luar kuota gratis) tidak lagi dicoba ulang di model yang sama karena menunggu
+  tidak membantu, dan langsung pindah ke model cadangan.
+- Error 400 (misalnya "User location is not supported") menampilkan pesan aslinya.
+- Model default diganti dari `gemini-2.5-flash` (deprecated, akan dialihkan Google pada 1 Desember 2026) ke
+  `gemini-3.6-flash` (Stable). Cadangannya `gemini-3.5-flash-lite` lalu `gemini-2.5-flash`. Hanya berlaku kalau
+  model belum pernah dipilih di bot atau `.env`.
+- **🧠 Pilih model** juga menyaring model Gemini yang bukan untuk teks: transkripsi, terjemahan live, robotik,
+  computer-use, dan pembuat gambar (nano-banana).
+- Sama untuk provider OpenAI-compatible.
+
+Diuji 10 pengecekan dengan isi error asli Gemini (limit 0, 404, 429, 503, lokasi tidak didukung).
+
+
 ## 2026-11-09 (lanjutan): provider OpenAI-compatible dan login Claude
 
 ### Provider OpenAI-compatible

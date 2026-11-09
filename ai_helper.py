@@ -20,7 +20,8 @@ import app_settings
 log = logging.getLogger("cvbot.ai")
 
 DEFAULTS = {
-    "AI_PROVIDER": "gemini", "GEMINI_MODEL": "gemini-2.5-flash", "GEMINI_FALLBACK_MODELS": "gemini-2.5-flash-lite",
+    "AI_PROVIDER": "gemini", "GEMINI_MODEL": "gemini-3.6-flash",
+    "GEMINI_FALLBACK_MODELS": "gemini-3.5-flash-lite, gemini-2.5-flash",
     "CLAUDE_MODEL": "claude-sonnet-5-5", "CLAUDE_AUTH": "key",
     "OPENAI_BASE_URL": "https://openrouter.ai/api/v1", "OPENAI_MODEL": "", "OPENAI_FALLBACK_MODELS": "",
     "OLLAMA_URL": "http://localhost:11434", "OLLAMA_MODEL": "qwen2.5:7b", "OLLAMA_VISION_MODEL": "qwen2.5vl:7b",
@@ -99,6 +100,29 @@ class _ModelUnavailable(Exception):
         self.status = status
 
 
+def _error_detail(resp: requests.Response) -> str:
+    """Pesan error asli dari server (Gemini & OpenAI-compatible sama-sama memakai {"error": {"message": ...}})."""
+    try:
+        error = resp.json().get("error")
+        message = error.get("message") if isinstance(error, dict) else error
+    except (ValueError, AttributeError):
+        message = None
+    return " ".join(str(message or resp.text or "").split())[:200]
+
+
+def _unavailable(resp: requests.Response) -> _ModelUnavailable:
+    status, detail = resp.status_code, _error_detail(resp)
+    if status == 404:
+        reason = "model tidak ditemukan atau tidak tersedia untuk API key ini"
+    elif status == 429 and "limit: 0" in resp.text:
+        reason = "tidak termasuk kuota gratis API key ini (limit 0), perlu akun berbayar"
+    elif status == 429:
+        reason = "kuota / batas pemakaian habis untuk sementara"
+    else:
+        reason = "server sedang sibuk"
+    return _ModelUnavailable(f"{reason} (HTTP {status}){': ' + detail if detail else ''}", status)
+
+
 def _models_with_fallback(name: str) -> list[str]:
     info = PROVIDERS[name]
     fallbacks = setting(info["fallback"]).split(",") if info["fallback"] else []
@@ -115,15 +139,20 @@ def _with_fallback(name: str, label: str, request) -> str:
         try:
             return request(model)
         except _ModelUnavailable as e:
-            log.warning("%s %s tidak tersedia: %s", label, model, e)
-            failures.append(e)
-    if all(f.status == 429 for f in failures):
-        raise RuntimeError(f"Kuota atau batas pemakaian {label} habis untuk sementara. Tunggu sebentar lalu "
-                           f"coba lagi, atau tambahkan model cadangan.")
-    if all(f.status == 404 for f in failures):
-        raise RuntimeError(f"Model {label} tidak ditemukan ({failures[0]}). Pilih model lain: {SETUP_HINT}")
-    raise RuntimeError(f"Server {label} sedang sibuk dan sudah dicoba beberapa kali. "
-                       "Biasanya hanya sebentar, coba lagi beberapa menit lagi.")
+            log.warning("%s %s gagal: %s", label, model, e)
+            failures.append((model, e))
+    statuses = {e.status for _, e in failures}
+    if statuses <= {429}:
+        headline = f"Semua model {label} yang dicoba sedang tidak bisa dipakai karena kuota."
+    elif statuses <= {404}:
+        headline = f"Model {label} yang dipilih tidak tersedia untuk API key kamu."
+    elif statuses <= {0, 500, 502, 503, 504}:
+        headline = (f"Server {label} sedang sibuk dan sudah dicoba beberapa kali. "
+                    "Biasanya hanya sebentar, coba lagi beberapa menit lagi.")
+    else:
+        headline = f"Semua model {label} yang dicoba gagal."
+    details = "\n".join(f"• {model}: {e}" for model, e in failures)
+    raise RuntimeError(f"{headline}\n{details}\nLihat model yang tersedia lewat 🧠 Pilih model. {SETUP_HINT}")
 
 
 def _post_with_retry(url: str, headers: dict, body: dict, retry_429: bool) -> requests.Response:
@@ -136,12 +165,14 @@ def _post_with_retry(url: str, headers: dict, body: dict, retry_429: bool) -> re
         except (requests.ConnectionError, requests.Timeout) as e:
             last = _ModelUnavailable(f"koneksi gagal ({type(e).__name__})", 0)
             continue
+        if resp.status_code == 429 and "limit: 0" in resp.text:
+            raise _unavailable(resp)  # model di luar kuota gratis: menunggu tidak akan membantu
         if resp.status_code in RETRY_STATUS or (retry_429 and resp.status_code == 429):
-            last = _ModelUnavailable(f"HTTP {resp.status_code}", resp.status_code)
+            last = _unavailable(resp)
             continue
         if resp.status_code in (404, 429):
             # Tidak ada gunanya diulang di model yang sama; model cadangan punya kuota sendiri
-            raise _ModelUnavailable(f"HTTP {resp.status_code}", resp.status_code)
+            raise _unavailable(resp)
         return resp
     raise last
 
@@ -160,7 +191,7 @@ def _gemini_request(model: str, body: dict) -> str:
     headers = {"x-goog-api-key": _api_key("gemini"), "Content-Type": "application/json"}
     resp = _post_with_retry(url, headers, body, retry_429=False)
     if not resp.ok:
-        raise RuntimeError(f"Gemini error {resp.status_code}: {resp.text[:300]}")
+        raise RuntimeError(f"Gemini error {resp.status_code}: {_error_detail(resp)}")
     candidates = resp.json().get("candidates") or []
     if not candidates:
         raise RuntimeError("Gemini tidak memberi jawaban (mungkin terkena filter). Coba lagi.")
@@ -192,7 +223,7 @@ def _openai_request(model: str, messages: list, max_tokens: int) -> str:
     if resp.status_code in (401, 403):
         raise RuntimeError(f"API key ditolak oleh {base}. {SETUP_HINT}")
     if not resp.ok:
-        raise RuntimeError(f"AI error {resp.status_code} dari {base}: {resp.text[:300]}")
+        raise RuntimeError(f"AI error {resp.status_code} dari {base}: {_error_detail(resp)}")
     choices = resp.json().get("choices") or []
     if not choices:
         raise RuntimeError("AI tidak memberi jawaban. Coba lagi atau pilih model lain.")
@@ -311,7 +342,9 @@ def _api_key(name: str) -> str:
 
 
 # ---------------------------------------------------------------- pengaturan AI dari bot
-NON_TEXT_MODELS = ("embedding", "tts", "image", "audio", "live", "native")
+# Model Gemini yang bukan untuk menjawab teks (suara, gambar, transkripsi, robotik, dll.)
+NON_TEXT_MODELS = ("embedding", "tts", "image", "audio", "live", "native", "transcribe", "translate", "robotics",
+                   "computer-use", "banana")
 
 
 class NoModelList(RuntimeError):
@@ -327,7 +360,7 @@ def list_models(name: str, api_key: str | None = None) -> list[str]:
         if resp.status_code in (400, 401, 403):
             raise RuntimeError("API key Gemini tidak valid.")
         if not resp.ok:
-            raise RuntimeError(f"Gemini error {resp.status_code}: {resp.text[:200]}")
+            raise RuntimeError(f"Gemini error {resp.status_code}: {_error_detail(resp)}")
         names = {m["name"].removeprefix("models/") for m in resp.json().get("models") or []
                  if "generateContent" in (m.get("supportedGenerationMethods") or [])}
         return sorted((n for n in names if n.startswith("gemini") and not any(x in n for x in NON_TEXT_MODELS)),
