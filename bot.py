@@ -38,6 +38,7 @@ import gmail_replies  # noqa: E402
 import job_alerts  # noqa: E402
 import job_fetcher  # noqa: E402
 import mailer  # noqa: E402
+import profile_edit as pe  # noqa: E402
 import storage  # noqa: E402
 import tracker  # noqa: E402
 
@@ -75,7 +76,7 @@ COMMANDS = [
     ("lamaran", "Daftar lamaran, ubah status, follow-up"),
     ("cekbalasan", "Cek balasan HR di Gmail sekarang"),
     ("statistik", "Statistik lamaran"),
-    ("profil", "Lihat hasil scan CV"),
+    ("cv", "Lihat & ubah CV asli kamu"),
     ("pengaturan", "Model AI, gaya email, font CV, akun Gmail, notifikasi"),
     ("revisi", "Revisi email lamaran / follow-up terakhir"),
     ("start", "Cara pakai & tampilkan menu"),
@@ -164,7 +165,7 @@ def gmail_configured() -> bool:
 
 def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        [["🎯 Rekomendasi", "📂 Lamaran"], ["📬 Cek Balasan", "📊 Statistik"], ["👤 Profil", "⚙️ Pengaturan"]],
+        [["🎯 Rekomendasi", "📂 Lamaran"], ["📬 Cek Balasan", "📊 Statistik"], ["📄 CV Saya", "⚙️ Pengaturan"]],
         resize_keyboard=True, is_persistent=True,
         input_field_placeholder="Kirim link, teks, atau foto lowongan")
 
@@ -204,16 +205,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @only_allowed
 async def profil(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    profile = load_user(update.effective_user.id).get("profile")
-    if not profile:
+    data = load_user(update.effective_user.id)
+    if not data.get("profile"):
         await update.message.reply_text("Belum ada CV. Kirim dulu file PDF/DOCX kamu.")
         return
-    skills = ", ".join(profile.get("skill") or []) or "-"
-    exp = "\n".join(f"- {e.get('posisi')} @ {e.get('perusahaan')} ({e.get('periode')})"
-                    for e in profile.get("pengalaman") or []) or "-"
-    await update.message.reply_text(
-        f"Nama: {profile.get('nama')}\nEmail: {profile.get('email')}\n\n"
-        f"Ringkasan: {profile.get('ringkasan')}\n\nSkill: {skills}\n\nPengalaman:\n{exp}")
+    text, markup = cv_overview(data)
+    await update.message.reply_text(text, reply_markup=markup)
 
 
 # ================================================================ tracker lamaran
@@ -901,7 +898,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     data = load_user(uid)
-    data.update({"cv_path": str(path), "profile": profile, "font_asli": font_raw})
+    data.update({"cv_path": str(path), "profile": profile, "font_asli": font_raw,
+                 "profile_edited": False, "cv_master_pdf": None})
     save_user(uid, data)
     context.user_data.update({"job": None, "active_profile": profile, "tailored_cv": None})
     await msg.edit_text(
@@ -915,7 +913,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================================================================ teks masuk
 MENU_ACTIONS = {
     "🎯 Rekomendasi": rekomendasi, "📂 Lamaran": lamaran, "📬 Cek Balasan": cekbalasan,
-    "📊 Statistik": statistik, "👤 Profil": profil, "⚙️ Pengaturan": pengaturan,
+    "📊 Statistik": statistik, "📄 CV Saya": profil, "👤 Profil": profil, "⚙️ Pengaturan": pengaturan,
 }
 
 
@@ -926,7 +924,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text in MENU_ACTIONS:
         context.user_data.update({"awaiting_email": False, "gmail_form": None, "ai_form": None,
-                                  "font_form": False, "par": None})
+                                  "font_form": False, "par": None, "cv_form": None})
         await MENU_ACTIONS[text](update, context)
         return
 
@@ -940,6 +938,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if context.user_data.get("font_form"):
         await handle_font_form(update.message, context, uid, text)
+        return
+
+    if context.user_data.get("cv_form"):
+        await handle_cv_form(update.message, context, uid, text)
         return
 
     if context.user_data.get("par"):
@@ -987,7 +989,13 @@ def email_subject(job: dict, name: str) -> str:
 
 
 def attachment_path(context, uid: int) -> str | None:
-    return context.user_data.get("tailored_cv") or load_user(uid).get("cv_path")
+    """CV yang dilampirkan: versi yang disesuaikan, atau CV asli (dibuat ulang kalau diubah lewat 📄 CV Saya)."""
+    if context.user_data.get("tailored_cv"):
+        return context.user_data["tailored_cv"]
+    data = load_user(uid)
+    if data.get("profile_edited") and data.get("cv_master_pdf"):
+        return data["cv_master_pdf"]
+    return data.get("cv_path")
 
 
 async def show_send_confirmation(message, context, uid: int):
@@ -1495,6 +1503,316 @@ async def handle_font_form(message, context, uid: int, text: str):
     await msg.edit_text(reply, reply_markup=markup)
 
 
+# ---- 📄 CV Saya: ubah CV asli
+CV_STALE = "Data CV sudah berubah, buka lagi dari 📄 CV Saya."
+CV_FORM_HINT = "\n\nKetik batal untuk membatalkan."
+
+
+def edit_profile(uid: int, fn):
+    """Ubah profil CV asli, tandai sudah diubah supaya lampiran CV asli dibuat ulang."""
+    def apply(d):
+        result = fn(d["profile"])
+        d["profile_edited"] = True
+        d["cv_master_pdf"] = None
+        return result
+    return update_user(uid, apply)
+
+
+def _guess_lang(profile: dict) -> str:
+    words = " ".join([profile.get("ringkasan") or ""] + [p for e in pe.entries(dict(profile), "pengalaman")
+                                                         for p in e["poin"]]).lower().split()
+    english = sum(w in ("the", "and", "with", "for", "of", "to") for w in words)
+    indonesian = sum(w in ("dan", "yang", "dengan", "untuk", "di", "ke") for w in words)
+    return "en" if english > indonesian else "id"
+
+
+async def ensure_master_cv(uid: int) -> str | None:
+    """PDF CV asli terbaru. Kalau CV asli diubah lewat bot, PDF dibuat ulang dari datanya."""
+    data = load_user(uid)
+    if not data.get("profile_edited"):
+        return data.get("cv_path")
+    if data.get("cv_master_pdf") and Path(data["cv_master_pdf"]).exists():
+        return data["cv_master_pdf"]
+    profile = data["profile"]
+    path = user_dir(uid) / f"CV_{safe_name(profile.get('nama') or 'Kandidat')}.pdf"
+    await asyncio.to_thread(cv_builder.build_pdf, profile, str(path), _guess_lang(profile), cv_font_for(data))
+    update_user(uid, lambda d: d.__setitem__("cv_master_pdf", str(path)))
+    return str(path)
+
+
+def cv_overview(data: dict, note: str = ""):
+    prof = data["profile"]
+    counts = {sec: len(pe.entries(dict(prof), sec)) for sec in pe.ENTRIES}
+    counts.update({sec: len(pe.list_items(dict(prof), sec)) for sec in pe.LISTS})
+    contact = " · ".join(x for x in (prof.get("email"), prof.get("telepon"), prof.get("lokasi")) if x) or "-"
+    summary = prof.get("ringkasan") or "-"
+    text = (f"{note}📄 CV Saya\nIni CV asli yang jadi dasar semua penyesuaian CV dan email lamaran.\n\n"
+            f"👤 {prof.get('nama') or '-'}\n{contact}\n\n"
+            f"📝 {summary[:400]}{'…' if len(summary) > 400 else ''}")
+    if data.get("profile_edited"):
+        text += "\n\n✏️ Sudah diubah lewat bot: lampiran \"CV asli\" dibuat ulang dari data ini."
+    return text, kb(
+        [("👤 Data diri", "cv:me"), ("📝 Ringkasan", "cv:f:ringkasan")],
+        [(f"💼 Pengalaman ({counts['pengalaman']})", "cv:e:pengalaman"), (f"🧩 Proyek ({counts['proyek']})", "cv:e:proyek")],
+        [(f"🛠️ Skill ({counts['skill']})", "cv:l:skill"), (f"🎓 Pendidikan ({counts['pendidikan']})", "cv:l:pendidikan")],
+        [(f"📜 Sertifikasi ({counts['sertifikasi']})", "cv:l:sertifikasi"), (f"🌐 Bahasa ({counts['bahasa']})", "cv:l:bahasa")],
+        [("📥 Unduh CV (PDF)", "cv:dl")])
+
+
+def cv_me_view(data: dict, note: str = ""):
+    prof = data["profile"]
+    lines = [f"{label}: {prof.get(f) or '-'}" for f, label in pe.FIELDS.items() if f != "ringkasan"]
+    links = pe.list_items(dict(prof), "tautan")
+    return (f"{note}👤 Data diri\n\n" + "\n".join(lines) + f"\nTautan: {', '.join(links) or '-'}",
+            kb([("✏️ Nama", "cv:f:nama"), ("✏️ Email", "cv:f:email")],
+               [("✏️ Telepon", "cv:f:telepon"), ("✏️ Lokasi", "cv:f:lokasi")],
+               [(f"🔗 Tautan ({len(links)})", "cv:l:tautan")], [("⬅️ CV Saya", "cv")]))
+
+
+def cv_list_view(data: dict, sec: str, note: str = ""):
+    items = pe.list_items(dict(data["profile"]), sec)
+    back = "cv:me" if sec == "tautan" else "cv"
+    lines = [f"{i + 1}. {item}" for i, item in enumerate(items)] or ["(belum ada)"]
+    rows = [[(f"{i + 1}. {item[:30]}", f"cv:li:{sec}:{i}")] for i, item in enumerate(items[:40])]
+    return (f"{note}{pe.LISTS[sec]}\n\n" + "\n".join(lines)[:3500] + "\n\nPilih item untuk diubah/dihapus.",
+            kb(*rows, [("➕ Tambah", f"cv:la:{sec}")], [("⬅️ Kembali", back)]))
+
+
+def cv_item_view(data: dict, sec: str, i: int):
+    item = pe.list_items(dict(data["profile"]), sec)[i]
+    return (f"{pe.LISTS[sec]} #{i + 1}\n\n{item}",
+            kb([("✏️ Ubah", f"cv:le:{sec}:{i}"), ("🗑️ Hapus", f"cv:ld:{sec}:{i}"), ("⬆️ Naikkan", f"cv:lu:{sec}:{i}")],
+               [("⬅️ Kembali", f"cv:l:{sec}")]))
+
+
+def cv_entries_view(data: dict, sec: str, note: str = ""):
+    items = pe.entries(dict(data["profile"]), sec)
+    lines = [f"{i + 1}. {pe.entry_title(sec, e)} · {len(e['poin'])} poin" for i, e in enumerate(items)] or ["(belum ada)"]
+    rows = [[(f"{i + 1}. {pe.entry_title(sec, e)[:40]}", f"cv:ei:{sec}:{i}")] for i, e in enumerate(items[:30])]
+    return (f"{note}{pe.ENTRIES[sec]['label']}\n\n" + "\n".join(lines)[:3500],
+            kb(*rows, [("➕ Tambah", f"cv:ea:{sec}")], [("⬅️ CV Saya", "cv")]))
+
+
+def cv_entry_view(data: dict, sec: str, i: int, note: str = ""):
+    entry = pe.entries(dict(data["profile"]), sec)[i]
+    fields = pe.ENTRIES[sec]["fields"]
+    lines = [f"{label}: {entry.get(f) or '-'}" for f, label in fields.items()]
+    points = [f"{j + 1}. {p}" for j, p in enumerate(entry["poin"])] or ["(belum ada poin)"]
+    rows = [[(f"✏️ {label}", f"cv:ef:{sec}:{i}:{f}") for f, label in fields.items()]]
+    numbers = [(f"• {j + 1}", f"cv:p:{sec}:{i}:{j}") for j in range(min(len(entry["poin"]), 20))]
+    rows += [numbers[k:k + 5] for k in range(0, len(numbers), 5)]
+    rows += [[("➕ Tambah poin", f"cv:pa:{sec}:{i}"), ("⬆️ Naikkan", f"cv:eu:{sec}:{i}")],
+             [("🗑️ Hapus", f"cv:ed:{sec}:{i}"), ("⬅️ Kembali", f"cv:e:{sec}")]]
+    text = (f"{note}{pe.ENTRIES[sec]['label']} #{i + 1}\n\n" + "\n".join(lines) + "\n\nPoin:\n" + "\n".join(points))
+    return text[:4000] + ("\n\nTekan nomor poin untuk mengubah, menghapus, atau mengurutkan." if entry["poin"] else ""), kb(*rows)
+
+
+def cv_point_view(data: dict, sec: str, i: int, j: int):
+    point = pe.entries(dict(data["profile"]), sec)[i]["poin"][j]
+    return (f"Poin {j + 1}\n\n{point}",
+            kb([("✏️ Ubah", f"cv:pe:{sec}:{i}:{j}"), ("🗑️ Hapus", f"cv:pd:{sec}:{i}:{j}"), ("⬆️ Naikkan", f"cv:pu:{sec}:{i}:{j}")],
+               [("⬅️ Kembali", f"cv:ei:{sec}:{i}")]))
+
+
+def cv_form_prompt(form: dict, profile: dict) -> str:
+    kind, sec = form["kind"], form.get("sec")
+    if kind == "field":
+        current = profile.get(form["field"]) or "-"
+        clear = "" if form["field"] == "nama" else " Ketik - untuk mengosongkan."
+        return f"Ketik {pe.FIELDS[form['field']].lower()} yang baru.{clear}\n\nSekarang:\n{current}{CV_FORM_HINT}"
+    if kind == "list_add":
+        sep = "pisahkan dengan koma atau baris baru" if sec == "skill" else "satu per baris"
+        return f"Ketik {pe.LISTS[sec].split(' ', 1)[1].lower()} yang mau ditambahkan ({sep}).{CV_FORM_HINT}"
+    if kind == "list_set":
+        return f"Ketik isi baru.\n\nSekarang:\n{pe.list_items(dict(profile), sec)[form['i']]}{CV_FORM_HINT}"
+    if kind == "entry_field":
+        current = pe.entries(dict(profile), sec)[form["i"]].get(form["field"]) or "-"
+        label = pe.ENTRIES[sec]["fields"][form["field"]]
+        return f"Ketik {label.lower()} yang baru. Ketik - untuk mengosongkan.\n\nSekarang:\n{current}{CV_FORM_HINT}"
+    if kind == "point_add":
+        return ("Ketik poin baru, satu per baris. Supaya kuat, tulis dengan pola PAR: masalah, apa yang kamu "
+                "lakukan, dan hasilnya (pakai angka kalau ada)." + CV_FORM_HINT)
+    if kind == "point_set":
+        current = pe.entries(dict(profile), sec)[form["i"]]["poin"][form["j"]]
+        return f"Ketik poin yang baru.\n\nSekarang:\n{current}{CV_FORM_HINT}"
+    if kind == "entry_add":
+        fields = list(pe.ENTRIES[sec]["fields"].items())
+        if form["step"] < len(fields):
+            optional = " (ketik - kalau tidak ada)" if fields[form["step"]][0] != fields[0][0] else ""
+            example = {"posisi": " Contoh: Backend Developer", "perusahaan": " Contoh: PT Maju Jaya",
+                       "periode": " Contoh: Jan 2024 - Sekarang", "nama": " Contoh: Aplikasi Kasir UMKM"}
+            return (f"{pe.ENTRIES[sec]['label']} baru ({form['step'] + 1}/{len(fields) + 1})\n"
+                    f"Ketik {fields[form['step']][1].lower()}{optional}.{example.get(fields[form['step']][0], '')}"
+                    f"{CV_FORM_HINT}")
+        return (f"{pe.ENTRIES[sec]['label']} baru ({len(fields) + 1}/{len(fields) + 1})\n"
+                "Ketik poin-poinnya, satu per baris (pola PAR: masalah, tindakan, hasil). Ketik - kalau mau "
+                f"diisi nanti.{CV_FORM_HINT}")
+    raise ValueError(kind)
+
+
+async def btn_cv(query, context, uid, data, arg):
+    if not data.get("profile"):
+        await query.message.reply_text("Belum ada CV. Kirim dulu file PDF/DOCX kamu.")
+        return
+    parts = arg.split(":") if arg else []
+    cmd, sec = (parts + ["", ""])[:2]
+    nums = [int(x) for x in parts[2:] if x.isdigit()]
+    try:
+        await _cv_action(query, context, uid, data, cmd, sec, nums, parts)
+    except (IndexError, KeyError, ValueError):
+        log.info("aksi CV kedaluwarsa: %s", arg)
+        text, markup = cv_overview(load_user(uid), f"{CV_STALE}\n\n")
+        await safe_edit(query.message, text, markup)
+
+
+async def _cv_action(query, context, uid, data, cmd, sec, nums, parts):
+    show = lambda view: safe_edit(query.message, *view)  # noqa: E731
+
+    def ask(form):
+        context.user_data["cv_form"] = form
+        return query.message.reply_text(cv_form_prompt(form, data["profile"]))
+
+    if cmd == "":
+        return await show(cv_overview(data))
+    if cmd == "dl":
+        edited = data.get("profile_edited")
+        await query.message.reply_text("⏳ Menyiapkan PDF CV...")
+        path = await ensure_master_cv(uid)
+        if not path or not Path(path).exists():
+            return await query.message.reply_text("File CV asli tidak ditemukan. Kirim ulang file CV kamu.")
+        with open(path, "rb") as f:
+            await query.message.reply_document(f, filename=Path(path).name, caption=(
+                "CV asli versi terbaru (dibuat dari data 📄 CV Saya)." if edited else
+                "Ini file CV asli yang kamu kirim. Setelah ada yang diubah lewat 📄 CV Saya, PDF-nya dibuat ulang."))
+        return
+    if cmd == "me":
+        return await show(cv_me_view(data))
+    if cmd == "f":
+        if sec not in pe.FIELDS:
+            raise KeyError(sec)
+        return await ask({"kind": "field", "field": sec})
+
+    if cmd == "l":
+        return await show(cv_list_view(data, sec))
+    if cmd == "li":
+        return await show(cv_item_view(data, sec, nums[0]))
+    if cmd == "la":
+        pe.LISTS[sec]
+        return await ask({"kind": "list_add", "sec": sec})
+    if cmd == "le":
+        pe.list_items(dict(data["profile"]), sec)[nums[0]]
+        return await ask({"kind": "list_set", "sec": sec, "i": nums[0]})
+    if cmd == "ld":
+        removed = edit_profile(uid, lambda prof: pe.list_delete(prof, sec, nums[0]))
+        return await show(cv_list_view(load_user(uid), sec, f"🗑️ Dihapus: {removed}\n\n"))
+    if cmd == "lu":
+        edit_profile(uid, lambda prof: pe.list_move_up(prof, sec, nums[0]))
+        return await show(cv_list_view(load_user(uid), sec))
+
+    if cmd == "e":
+        return await show(cv_entries_view(data, sec))
+    if cmd == "ei":
+        return await show(cv_entry_view(data, sec, nums[0]))
+    if cmd == "ea":
+        pe.ENTRIES[sec]
+        return await ask({"kind": "entry_add", "sec": sec, "step": 0, "entry": {}})
+    if cmd == "ef":
+        field = parts[3]
+        pe.ENTRIES[sec]["fields"][field]
+        pe.entries(dict(data["profile"]), sec)[nums[0]]
+        return await ask({"kind": "entry_field", "sec": sec, "i": nums[0], "field": field})
+    if cmd == "eu":
+        edit_profile(uid, lambda prof: pe.entry_move_up(prof, sec, nums[0]))
+        return await show(cv_entries_view(load_user(uid), sec))
+    if cmd == "ed":
+        entry = pe.entries(dict(data["profile"]), sec)[nums[0]]
+        return await safe_edit(query.message, f"Hapus {pe.entry_title(sec, entry)} beserta semua poinnya?",
+                               kb([("🗑️ Ya, hapus", f"cv:edok:{sec}:{nums[0]}"), ("❌ Batal", f"cv:ei:{sec}:{nums[0]}")]))
+    if cmd == "edok":
+        removed = edit_profile(uid, lambda prof: pe.entry_delete(prof, sec, nums[0]))
+        return await show(cv_entries_view(load_user(uid), sec, f"🗑️ Dihapus: {pe.entry_title(sec, removed)}\n\n"))
+
+    if cmd == "pa":
+        pe.entries(dict(data["profile"]), sec)[nums[0]]
+        return await ask({"kind": "point_add", "sec": sec, "i": nums[0]})
+    if cmd == "p":
+        return await show(cv_point_view(data, sec, nums[0], nums[1]))
+    if cmd == "pe":
+        pe.entries(dict(data["profile"]), sec)[nums[0]]["poin"][nums[1]]
+        return await ask({"kind": "point_set", "sec": sec, "i": nums[0], "j": nums[1]})
+    if cmd == "pd":
+        edit_profile(uid, lambda prof: pe.point_delete(prof, sec, nums[0], nums[1]))
+        return await show(cv_entry_view(load_user(uid), sec, nums[0], "🗑️ Poin dihapus.\n\n"))
+    if cmd == "pu":
+        edit_profile(uid, lambda prof: pe.point_move_up(prof, sec, nums[0], nums[1]))
+        return await show(cv_entry_view(load_user(uid), sec, nums[0]))
+    raise ValueError(cmd)
+
+
+async def handle_cv_form(message, context, uid: int, text: str):
+    """Isian teks untuk 📄 CV Saya. Setelah tersimpan, tampilkan bagian yang baru diubah."""
+    form = context.user_data["cv_form"]
+    if text.lower() == "batal":
+        context.user_data["cv_form"] = None
+        await message.reply_text("Dibatalkan.")
+        return
+    value = "" if text.strip() == "-" else text.strip()
+    kind, sec = form["kind"], form.get("sec")
+
+    async def done(view):
+        context.user_data["cv_form"] = None
+        reply, markup = view
+        await message.reply_text(reply, reply_markup=markup)
+
+    try:
+        if kind == "field":
+            if form["field"] == "nama" and not value:
+                await message.reply_text("Nama tidak boleh kosong. Ketik nama kamu, atau ketik batal.")
+                return
+            edit_profile(uid, lambda prof: pe.set_field(prof, form["field"], value))
+            data = load_user(uid)
+            view = cv_overview(data, "✅ Tersimpan.\n\n") if form["field"] == "ringkasan" else cv_me_view(data, "✅ Tersimpan.\n\n")
+            return await done(view)
+        if kind == "list_add":
+            raw = value.replace(",", "\n") if sec == "skill" else value
+            added = edit_profile(uid, lambda prof: pe.list_add(prof, sec, raw.splitlines()))
+            return await done(cv_list_view(load_user(uid), sec, f"✅ {added} ditambahkan.\n\n"))
+        if kind == "list_set":
+            if not value:
+                await message.reply_text("Isinya tidak boleh kosong. Untuk menghapus, pakai tombol 🗑️ Hapus.")
+                return
+            edit_profile(uid, lambda prof: pe.list_set(prof, sec, form["i"], value))
+            return await done(cv_list_view(load_user(uid), sec, "✅ Tersimpan.\n\n"))
+        if kind == "entry_field":
+            edit_profile(uid, lambda prof: pe.entry_set_field(prof, sec, form["i"], form["field"], value))
+            return await done(cv_entry_view(load_user(uid), sec, form["i"], "✅ Tersimpan.\n\n"))
+        if kind == "point_add":
+            added = edit_profile(uid, lambda prof: pe.point_add(prof, sec, form["i"], value.splitlines()))
+            return await done(cv_entry_view(load_user(uid), sec, form["i"], f"✅ {added} poin ditambahkan.\n\n"))
+        if kind == "point_set":
+            if not value:
+                await message.reply_text("Poin tidak boleh kosong. Untuk menghapus, pakai tombol 🗑️ Hapus.")
+                return
+            edit_profile(uid, lambda prof: pe.point_set(prof, sec, form["i"], form["j"], value))
+            return await done(cv_entry_view(load_user(uid), sec, form["i"], "✅ Tersimpan.\n\n"))
+        if kind == "entry_add":
+            fields = list(pe.ENTRIES[sec]["fields"])
+            if form["step"] < len(fields):
+                if form["step"] == 0 and not value:
+                    await message.reply_text("Bagian ini wajib diisi. Ketik lagi, atau ketik batal.")
+                    return
+                form["entry"][fields[form["step"]]] = value
+                form["step"] += 1
+                await message.reply_text(cv_form_prompt(form, load_user(uid)["profile"]))
+                return
+            form["entry"]["poin"] = value.splitlines()
+            i = edit_profile(uid, lambda prof: pe.entry_add(prof, sec, form["entry"]))
+            return await done(cv_entry_view(load_user(uid), sec, i, "✅ Ditambahkan di urutan paling atas.\n\n"))
+    except (IndexError, KeyError):
+        context.user_data["cv_form"] = None
+        await message.reply_text(CV_STALE)
+
+
 async def btn_lamaran_list(query, context, uid, data, arg):
     text, markup = lamaran_list_view(data)
     await safe_edit(query.message, text, markup)
@@ -1659,6 +1977,8 @@ async def btn_send(query, context, uid, data, arg):
         await query.message.reply_text(GMAIL_MISSING)
         return
     job = context.user_data["job"]
+    if not context.user_data.get("tailored_cv"):
+        await ensure_master_cv(uid)
     if job.get("email_hr"):
         context.user_data["recipient"] = job["email_hr"]
         await show_send_confirmation(query.message, context, uid)
@@ -1722,7 +2042,7 @@ async def btn_cancel_send(query, context, uid, data, arg):
 
 BUTTONS = {
     "skip": btn_skip, "gaya": btn_gaya, "set": btn_settings, "acc": btn_accounts, "ai": btn_ai,
-    "font": btn_font, "par": btn_par,
+    "font": btn_font, "par": btn_par, "cv": btn_cv,
     "lamlist": btn_lamaran_list,
     "app": btn_app_detail, "st": btn_status,
     "str": lambda *a: btn_status(*a, new_message=True),
@@ -1764,7 +2084,7 @@ def main():
         .post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("profil", profil))
+    app.add_handler(CommandHandler(["cv", "profil"], profil))
     app.add_handler(CommandHandler("revisi", revisi))
     app.add_handler(CommandHandler(["lamaran", "riwayat"], lamaran))
     app.add_handler(CommandHandler("statistik", statistik))

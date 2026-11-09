@@ -10,7 +10,8 @@ Daftar perubahan terbaru dan cara upgrade: lihat [CHANGELOG.md](CHANGELOG.md).
 
 1. Isi `.env` (lihat [Setup](#setup)), lalu jalankan bot di VPS dengan `./bot.sh install`
    (lihat [Jalan di VPS](#jalan-di-vps-linux-background)).
-2. Di Telegram, buka bot kamu dan kirim `/start`. Tombol menu muncul di bawah kolom chat.
+2. Di Telegram, buka bot kamu dan kirim `/start`. Tombol menu muncul di bawah kolom chat
+   (🎯 Rekomendasi, 📂 Lamaran, 📬 Cek Balasan, 📊 Statistik, 📄 CV Saya, ⚙️ Pengaturan).
 3. Kirim file CV (PDF/DOCX).
 4. Kirim lowongan: link, teks, foto poster, atau forward postingan dari grup lain.
    Atau tekan **🎯 Rekomendasi** untuk cari dari email job alert.
@@ -141,6 +142,26 @@ Update ke versi terbaru: `git pull && .venv/bin/pip install -r requirements.txt 
 Jangan jalankan `python bot.py` manual saat service aktif, dan jangan jalankan bot yang sama
 di laptop sekaligus. Dua bot dengan token yang sama akan saling bentrok.
 
+## 📄 CV Saya: ubah CV asli
+
+CV asli (hasil scan CV yang kamu kirim) jadi dasar semua penyesuaian CV dan email lamaran. Supaya tidak perlu
+upload ulang setiap ada perubahan, ubah langsung dari tombol **📄 CV Saya** (atau `/cv`):
+
+- **👤 Data diri**: nama, email, telepon, lokasi, dan 🔗 tautan (portofolio, LinkedIn, GitHub).
+- **📝 Ringkasan**.
+- **💼 Pengalaman** dan **🧩 Proyek**: tambah (pengalaman baru ditaruh paling atas), ubah posisi/perusahaan/
+  periode, hapus (dengan konfirmasi), dan naikkan urutan. Pilih nomor poin untuk mengubah, menghapus, atau
+  mengurutkannya, atau **➕ Tambah poin** (satu per baris, sebaiknya dengan pola PAR).
+- **🛠️ Skill**, **🎓 Pendidikan**, **📜 Sertifikasi**, **🌐 Bahasa**: tambah, ubah, hapus, dan urutkan. Skill bisa
+  ditambah beberapa sekaligus, dipisah koma.
+- **📥 Unduh CV (PDF)**: CV asli versi terbaru.
+
+Saat mengisi, ketik `-` untuk mengosongkan bagian yang opsional, atau `batal` untuk membatalkan.
+
+Setelah ada yang diubah, **lampiran "CV asli" saat melamar dibuat ulang dari data terbaru** (dengan font CV
+kamu), jadi yang terkirim bukan lagi file lama. Kalau kamu upload file CV baru, data CV asli diganti dengan
+hasil scan file itu.
+
 ## Pengaturan Model AI
 
 Buka **⚙️ Pengaturan > 🤖 Model AI**:
@@ -246,7 +267,7 @@ di samping kolom chat, jadi tidak perlu hafal perintahnya.
 - `/cekbalasan` - cek balasan HR di Gmail sekarang
 - `/pengaturan` (atau `/config`) - model AI, gaya email lamaran, font CV, akun Gmail, nyala/matikan cek otomatis
 - `/gaya` - atur gaya email lamaran (formal, santai, singkat)
-- `/profil` - lihat hasil scan CV
+- `/cv` (atau `/profil`) - lihat & ubah CV asli kamu (📄 CV Saya)
 - `/revisi <instruksi>` - revisi email lamaran atau email follow-up terakhir
 
 Isi **⚙️ Pengaturan**:

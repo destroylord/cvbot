@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-11-09 (lanjutan): 📄 CV Saya, ubah CV asli dari Telegram
+
+CV asli tidak perlu lagi di-upload ulang setiap ada perubahan. Tombol menu **👤 Profil** diganti **📄 CV Saya**
+(tombol lama tetap jalan), perintah `/cv` (dan `/profil`).
+
+- Ubah **data diri** (nama, email, telepon, lokasi, tautan) dan **ringkasan**.
+- **Pengalaman & proyek**: tambah bertahap (pengalaman baru di urutan paling atas), ubah tiap field, hapus dengan
+  konfirmasi, naikkan urutan. Poin bisa ditambah (satu per baris, diingatkan pola PAR), diubah, dihapus, dan
+  diurutkan.
+- **Skill, pendidikan, sertifikasi, bahasa, tautan**: tambah (skill bisa dipisah koma, duplikat diabaikan), ubah,
+  hapus, urutkan.
+- **📥 Unduh CV (PDF)**.
+- **Lampiran ikut berubah**: setelah CV asli diubah, lampiran "CV asli" saat melamar dibuat ulang dari data
+  terbaru dengan font CV kamu, bukan file lama yang dulu di-upload. Upload file CV baru mengembalikan ke hasil
+  scan file itu.
+- Tombol lama yang menunjuk data yang sudah dihapus atau berubah memberi pesan jelas, tidak crash. Isian bisa
+  dibatalkan dengan `batal` atau tombol menu.
+- Modul baru `profile_edit.py`: fungsi murni untuk mengubah profil (tanpa Telegram), tahan data AI yang tidak rapi.
+
+Diuji 40 pengecekan: fungsi `profile_edit`, seluruh alur menu (data diri, ringkasan, daftar, pengalaman bertahap,
+poin, hapus dengan konfirmasi), tombol kedaluwarsa, batal, unduh PDF, dan lampiran lamaran memakai CV terbaru.
+
+
 ## 2026-11-09 (lanjutan): metode PAR, font CV, email lamaran yang wajar
 
 ### Metode PAR + tanya hasil ke pengguna
