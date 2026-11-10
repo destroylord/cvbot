@@ -9,6 +9,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from telegram import BotCommand, Update
+from telegram.error import TelegramError
 from telegram.ext import (
     Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, PicklePersistence, filters,
 )
@@ -170,7 +171,11 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def post_init(app: Application):
-    await app.bot.set_my_commands([BotCommand(name, desc) for name, desc in COMMANDS])
+    # Daftar perintah di tombol Menu hanya tampilan: kalau gagal (jaringan lambat), bot tetap jalan
+    try:
+        await app.bot.set_my_commands([BotCommand(name, desc) for name, desc in COMMANDS])
+    except TelegramError as e:
+        log.warning("daftar perintah Menu belum terpasang (%s), dicoba lagi saat bot start berikutnya", e)
 
 
 def main():
@@ -178,8 +183,10 @@ def main():
         log.warning("ALLOWED_USER_IDS kosong: SIAPA PUN bisa memakai bot ini, dan cek harian tidak aktif!")
 
     persistence = PicklePersistence(filepath=str(DATA_DIR / "bot_state.pkl"))
-    app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).persistence(persistence) \
-        .post_init(post_init).build()
+    # Batas tunggu bawaan (5 detik) terlalu pendek untuk koneksi VPS yang kadang lambat ke api.telegram.org
+    app = (Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).persistence(persistence)
+           .connect_timeout(20).read_timeout(30).write_timeout(30).pool_timeout(10)
+           .post_init(post_init).build())
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler(["cv", "profil"], menu_cv.profil))
@@ -210,7 +217,8 @@ def main():
                 fitur_kirim.schedule_queued(app.job_queue, uid, item)
 
     log.info("Bot berjalan...")
-    app.run_polling()
+    # bootstrap_retries=-1: kalau jaringan putus saat start, terus coba lagi (bawaannya langsung berhenti)
+    app.run_polling(bootstrap_retries=-1)
 
 
 if __name__ == "__main__":

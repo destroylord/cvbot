@@ -157,6 +157,21 @@ setiap VPS reboot, dan restart sendiri kalau crash. Terminal SSH boleh ditutup. 
 
 Update ke versi terbaru: `git pull && .venv/bin/pip install -r requirements.txt && ./bot.sh restart`.
 
+Kalau di log muncul `telegram.error.TimedOut` sesekali, itu koneksi VPS ke Telegram yang sedang lambat. Bot
+menunggu lebih lama, terus mencoba ulang saat start, dan systemd menyalakannya lagi kalau tetap berhenti. Kalau
+terjadi **terus-menerus**, cek koneksi VPS ke Telegram:
+
+```
+curl -4 -sS -m 10 -o /dev/null -w "IPv4: %{http_code} %{time_total}s
+" https://api.telegram.org
+curl -6 -sS -m 10 -o /dev/null -w "IPv6: %{http_code} %{time_total}s
+" https://api.telegram.org
+```
+
+Hasil normal: `302` dalam beberapa detik. Kalau IPv4 berhasil tapi IPv6 timeout, VPS punya IPv6 yang rusak.
+Utamakan IPv4 dengan menambahkan baris `precedence ::ffff:0:0/96 100` ke `/etc/gai.conf`, lalu `./bot.sh restart`.
+Kalau keduanya timeout, koneksi VPS ke Telegram memang bermasalah: hubungi penyedia VPS.
+
 Jangan jalankan `python bot.py` manual saat service aktif, dan jangan jalankan bot yang sama
 di laptop sekaligus. Dua bot dengan token yang sama akan saling bentrok.
 

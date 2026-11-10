@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-11-10: bot tidak berhenti karena `telegram.error.TimedOut` saat start
+
+Penyebab: saat start, bot menghubungi `api.telegram.org` (cek token dan pasang daftar perintah Menu). Kalau koneksi
+VPS lambat, batas tunggu bawaan 5 detik terlewati. Library tidak mencoba ulang langkah ini secara default, dan
+pemasangan daftar perintah juga tidak dilindungi, jadi satu kali timeout langsung mematikan bot
+(`status=1/FAILURE`), sampai systemd menyalakannya lagi.
+
+- `run_polling(bootstrap_retries=-1)`: kalau jaringan putus saat start, terus mencoba ulang.
+- Batas tunggu diperpanjang: connect 20 detik, read/write 30 detik, pool 10 detik.
+- Gagal memasang daftar perintah Menu hanya dicatat di log, bot tetap jalan.
+- README: cara cek koneksi VPS ke Telegram (IPv4/IPv6) kalau timeout terjadi terus-menerus.
+- 2 tes baru (`tests/test_startup.py`), total 111 tes.
+
+
 ## 2026-11-09 (lanjutan): tes otomatis & bot.py dipecah per fitur
 
 - **Tes otomatis** (`tests/`, 109 tes, `pytest`): modul murni (aturan lowongan, ubah profil, AI & perbaikan JSON,
